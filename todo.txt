@@ -1,0 +1,2 @@
+check if we need to make base url a param, 
+or  flag and if we can conenct to durable objects

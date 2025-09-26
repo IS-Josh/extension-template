@@ -1,0 +1,33 @@
+# name: test_cloudflare_d1
+# description: basic load and function presence
+
+require cloudflare_d1
+
+statement ok
+LOAD 'cloudflare_d1';
+
+query I
+SELECT cloudflare_d1('Jane');
+----
+CloudflareD1 Jane 🐥
+
+# d1_query smoke: will error without valid creds, expect failure message
+statement error
+SELECT * FROM d1_query('SELECT 1 as x', NULL, 'acc', 'me@example.com', 'apikey', 'db');
+----
+D1 query bind failed
+
+# name: test/sql/cloudflare_d1.test
+# description: test cloudflare_d1 extension
+# group: [sql]
+
+# Confirm the extension works
+query I
+SELECT cloudflare_d1('Sam');
+----
+CloudflareD1 Sam 🐥
+
+query I
+SELECT cloudflare_d1_openssl_version('Michael') ILIKE 'CloudflareD1 Michael, my linked OpenSSL version is OpenSSL%';
+----
+true

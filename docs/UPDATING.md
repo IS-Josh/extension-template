@@ -21,3 +21,52 @@ For figuring out how and why the C++ API changed, we recommend using the followi
 - DuckDB's [Release Notes](https://github.com/duckdb/duckdb/releases)
 - DuckDB's history of [Core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions)
 - The git history of the relevant C++ Header file of the API that has changed
+
+# cloudflare_d1
+
+DuckDB extension to query and write to Cloudflare D1 via the Cloudflare API.
+
+## Features
+
+- Table function `d1_query(sql, named_params_json?, account_id, database_id, api_token, api_base_url?)`
+  - Executes SQL via D1 `/query` endpoint and returns a table
+  - Named parameters can be provided as a JSON object string `{ "name": "value" }`
+- Scalar function `d1_execute(sql, account_id, database_id, api_token, api_base_url?) -> BIGINT`
+  - Executes a statement and returns `changes` from D1 `meta`
+
+## Auth and API
+
+Uses Bearer token auth to Cloudflare API base `https://api.cloudflare.com/client/v4` by default.
+See Cloudflare D1 API reference: https://developers.cloudflare.com/api/resources/d1/
+
+## Build & Test
+
+```
+make release
+./build/release/duckdb -unsigned
+D LOAD 'build/release/extension/cloudflare_d1/cloudflare_d1.duckdb_extension';
+D SELECT cloudflare_d1('Jane');
+```
+
+Run tests:
+
+```
+make test
+```
+
+End-to-end test script (requires valid D1 credentials):
+
+```
+scripts/test_d1.sh <ACCOUNT_ID> <DATABASE_ID> <API_TOKEN> [API_BASE_URL]
+```
+
+## Notes
+
+- Response schema is derived from D1 `meta.columns`. Values are returned as VARCHAR currently.
+- Current implementation uses single request per query. Pagination may be added later.
+
+## References
+
+- Cloudflare D1 API: https://developers.cloudflare.com/api/resources/d1/
+- DuckDB Extension Template: https://github.com/duckdb/extension-template/
+- DuckDB Postgres extension (reference patterns): https://github.com/duckdb/duckdb-postgres
