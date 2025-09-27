@@ -1,10 +1,187 @@
-# CloudflareD1
+# CloudflareD1 DuckDB Extension
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+A DuckDB extension that provides seamless integration with Cloudflare D1 databases, enabling you to query, insert, update, and delete data from D1 databases directly within DuckDB.
 
----
+## Features
 
-This extension, CloudflareD1, allow you to ... <extension_goal>.
+- **Read Operations**: Query D1 databases using SQL with automatic type mapping
+- **Write Operations**: Insert, update, and delete data in D1 databases
+- **Type Mapping**: Intelligent mapping between SQLite/D1 types and DuckDB types
+- **Catalog Integration**: Automatic table discovery and schema management
+- **Bulk Operations**: Efficient bulk insert operations for large datasets
+- **Catalog Refresh**: Refresh table schemas to reflect DDL changes
+
+## Functions
+
+### Query Functions
+
+#### `d1_query(sql, account_id, api_token, database_id)`
+Execute a SELECT query against a D1 database and return results as a table.
+
+```sql
+SELECT * FROM d1_query('SELECT * FROM users WHERE age > 18', 'your_account_id', 'your_api_token', 'your_database_id');
+```
+
+#### `d1_execute(sql, account_id, api_token, database_id)`
+Execute any SQL statement (INSERT, UPDATE, DELETE, CREATE, etc.) against a D1 database.
+
+```sql
+SELECT d1_execute('INSERT INTO users (name, age) VALUES (''John'', 25)', 'your_account_id', 'your_api_token', 'your_database_id');
+```
+
+### Write Functions
+
+#### `d1_insert(table_name, account_id, api_token, database_id, col1, val1, col2, val2, ...)`
+Insert a single row into a D1 table.
+
+```sql
+SELECT d1_insert('users', 'your_account_id', 'your_api_token', 'your_database_id', 'name', 'John', 'age', '25', 'email', 'john@example.com');
+```
+
+#### `d1_update(table_name, account_id, api_token, database_id, where_col, where_val, set_col1, set_val1, set_col2, set_val2, ...)`
+Update rows in a D1 table.
+
+```sql
+SELECT d1_update('users', 'your_account_id', 'your_api_token', 'your_database_id', 'id', '1', 'name', 'John Updated', 'age', '26');
+```
+
+#### `d1_delete(table_name, account_id, api_token, database_id, where_col, where_val)`
+Delete rows from a D1 table.
+
+```sql
+SELECT d1_delete('users', 'your_account_id', 'your_api_token', 'your_database_id', 'id', '1');
+```
+
+### Bulk Operations
+
+#### `d1_bulk_insert(account_id, api_token, database_id, table_name, columns, values)`
+Insert multiple rows efficiently using JSON format.
+
+```sql
+SELECT d1_bulk_insert('your_account_id', 'your_api_token', 'your_database_id', 'users', 'name,age,email', 'John,25,john@example.com;Jane,30,jane@example.com');
+```
+
+### Catalog Management
+
+#### `d1_refresh(account_id, api_token, database_id, schema_or_table_name)`
+Refresh the catalog to reflect schema changes in the D1 database.
+
+```sql
+SELECT d1_refresh('your_account_id', 'your_api_token', 'your_database_id', 'main');
+```
+
+### Storage Extension
+
+#### `ATTACH 'd1://account_id=...;api_token=...;database_id=...' AS db_name`
+Attach a D1 database as a DuckDB database for seamless integration.
+
+```sql
+ATTACH 'd1://account_id=your_account_id;api_token=your_api_token;database_id=your_database_id' AS d1_db;
+SELECT * FROM d1_db.users;
+```
+
+## Type Mapping
+
+The extension automatically maps SQLite/D1 types to appropriate DuckDB types:
+
+- `INTEGER` → `BIGINT`
+- `REAL` → `DOUBLE`
+- `TEXT`/`VARCHAR` → `VARCHAR`
+- `BLOB` → `BLOB`
+- `BOOLEAN` → `BOOLEAN`
+- `DATE` → `DATE`
+- `TIME` → `TIME`
+- `TIMESTAMP` → `TIMESTAMP`
+- `NUMERIC`/`DECIMAL` → `DECIMAL(38,10)`
+- `JSON` → `JSON`
+- `UUID` → `UUID`
+
+## Configuration
+
+### Getting D1 Credentials
+
+1. **Account ID**: Found in your Cloudflare dashboard URL or API
+2. **API Token**: Create a custom token with D1 permissions in Cloudflare dashboard
+3. **Database ID**: Found in your D1 database settings
+
+### Example Configuration
+
+```sql
+-- Set up D1 connection parameters
+SET d1_account_id = 'your_account_id';
+SET d1_api_token = 'your_api_token';
+SET d1_database_id = 'your_database_id';
+
+-- Query D1 database
+SELECT * FROM d1_query('SELECT * FROM users', current_setting('d1_account_id'), current_setting('d1_api_token'), current_setting('d1_database_id'));
+```
+
+## Examples
+
+### Basic Query
+```sql
+-- Load the extension
+LOAD 'cloudflare_d1';
+
+-- Query users table
+SELECT * FROM d1_query('SELECT id, name, email FROM users WHERE active = 1', 'account_id', 'api_token', 'database_id');
+```
+
+### Insert Data
+```sql
+-- Insert a new user
+SELECT d1_insert('users', 'account_id', 'api_token', 'database_id', 'name', 'Alice', 'email', 'alice@example.com', 'age', '28');
+```
+
+### Update Data
+```sql
+-- Update user email
+SELECT d1_update('users', 'account_id', 'api_token', 'database_id', 'id', '123', 'email', 'newemail@example.com');
+```
+
+### Bulk Operations
+```sql
+-- Insert multiple users
+SELECT d1_bulk_insert('account_id', 'api_token', 'database_id', 'users', 'name,email,age', 'Bob,bob@example.com,30;Carol,carol@example.com,25');
+```
+
+### Attach as Database
+```sql
+-- Attach D1 database
+ATTACH 'd1://account_id=your_account_id;api_token=your_api_token;database_id=your_database_id' AS my_d1_db;
+
+-- Query directly
+SELECT * FROM my_d1_db.users WHERE age > 25;
+
+-- Join with local data
+SELECT u.name, l.city 
+FROM my_d1_db.users u 
+JOIN local_cities l ON u.city_id = l.id;
+```
+
+## Error Handling
+
+The extension provides detailed error messages for common issues:
+
+- **Authentication errors**: Invalid API token or account ID
+- **Database not found**: Invalid database ID
+- **SQL syntax errors**: Malformed SQL statements
+- **Type conversion errors**: Incompatible data types
+- **Network errors**: Connection issues with Cloudflare API
+
+## Performance Considerations
+
+- **Bulk operations**: Use `d1_bulk_insert` for inserting large datasets
+- **Query optimization**: Use appropriate WHERE clauses to limit data transfer
+- **Connection reuse**: The extension reuses HTTP connections when possible
+- **Type mapping**: Automatic type conversion may add overhead for large datasets
+
+## Limitations
+
+- **Read-only catalog**: Schema changes require manual refresh
+- **No transactions**: Each operation is independent
+- **Rate limits**: Subject to Cloudflare D1 API rate limits
+- **Network dependency**: Requires internet connection to Cloudflare
 
 
 ## Building

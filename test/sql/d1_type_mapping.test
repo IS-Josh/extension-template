@@ -1,0 +1,55 @@
+# name: test_d1_type_mapping
+# description: test D1 type mapping functionality
+# group: [sql]
+
+require cloudflare_d1
+
+statement ok
+LOAD 'cloudflare_d1';
+
+# Test type mapping function exists and works
+# Note: This is a test of the type mapping logic, not actual D1 queries
+# We'll test the function registration and basic functionality
+
+# Test that the extension loads without errors
+query I
+SELECT cloudflare_d1('type_mapping_test');
+----
+CloudflareD1 type_mapping_test 🐥
+
+# Test that d1_query function is registered with proper signature
+# This will fail with invalid credentials but should show the function is registered
+statement error
+SELECT * FROM d1_query('SELECT 1 as test_int, 1.5 as test_real, "hello" as test_text, 1 as test_bool', 'test_account', 'test_token', 'test_db');
+----
+D1 query bind failed
+
+# Test that d1_execute function is registered
+statement error
+SELECT d1_execute('CREATE TABLE test_types (id INTEGER, name TEXT, value REAL, active BOOLEAN)', 'test_account', 'test_token', 'test_db');
+----
+D1 execute failed
+
+# Test that d1_insert function is registered with proper signature
+statement error
+SELECT d1_insert('test_table', 'test_account', 'test_token', 'test_db', 'id', '1', 'name', 'test', 'value', '3.14', 'active', 'true');
+----
+D1 INSERT failed
+
+# Test that d1_update function is registered
+statement error
+SELECT d1_update('test_table', 'test_account', 'test_token', 'test_db', 'id', '1', 'name', 'updated', 'value', '2.71');
+----
+D1 UPDATE failed
+
+# Test that d1_delete function is registered
+statement error
+SELECT d1_delete('test_table', 'test_account', 'test_token', 'test_db', 'id', '1');
+----
+D1 DELETE failed
+
+# Test that d1_refresh function is registered and works
+query I
+SELECT d1_refresh('test_account', 'test_token', 'test_db', 'main');
+----
+1

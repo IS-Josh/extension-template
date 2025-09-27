@@ -19,6 +19,7 @@
 #include "include/d1_client.hpp"
 #include "include/d1_functions.hpp"
 #include "include/d1_storage.hpp"
+#include "include/d1_type_mapping.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
@@ -27,7 +28,7 @@ static bool ShouldUseObjectQueryForSelect(const string &sql) {
     // Use object query only for specific meta queries that need object format
     auto lowered = StringUtil::Lower(sql);
     if (sql.find("/*object*/") != string::npos) return true;
-    // PRAGMA statements often expect specific column metadata 
+    // PRAGMA statements often expect specific column metadata
     if (StringUtil::StartsWith(lowered, "pragma")) return true;
     return false;
 }
@@ -99,20 +100,58 @@ unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInpu
 	} else if (!res.columns.empty()) {
 		for (auto &c : res.columns) {
 			bind->names.push_back(c.name.empty() ? string("column") : c.name);
-			// SQLite-like type mapping: detect common affinities
-			auto type_lower = StringUtil::Lower(c.type);
-			LogicalType lt = LogicalType::VARCHAR;
-			if (type_lower.find("int") != string::npos) {
-				lt = LogicalType::BIGINT;
-			} else if (type_lower.find("char") != string::npos || type_lower.find("clob") != string::npos || type_lower.find("text") != string::npos) {
-				lt = LogicalType::VARCHAR;
-			} else if (type_lower.find("blob") != string::npos) {
-				lt = LogicalType::BLOB;
-			} else if (type_lower.find("real") != string::npos || type_lower.find("floa") != string::npos || type_lower.find("doub") != string::npos) {
-				lt = LogicalType::DOUBLE;
-			} else if (type_lower.find("bool") != string::npos) {
-				lt = LogicalType::BOOLEAN;
-			}
+			// Use comprehensive SQLite type mapping
+			LogicalType lt = MapSQLiteTypeToDuckDB(c.type);
+			bind->return_types.push_back(lt);
+		}
+	} else {
+		// No metadata and no rows; return a single generic column
+		bind->names.push_back("column");
+		bind->return_types.push_back(LogicalType::VARCHAR);
+	}
+    return_types.clear();
+    names.clear();
+    return_types.reserve(bind->return_types.size());
+    names.reserve(bind->names.size());
+    for (auto &t : bind->return_types) return_types.push_back(t);
+    for (auto &n : bind->names) names.push_back(n);
+	return std::move(bind);
+}
+
+// Bind function for d1_scan - scans a specific table
+unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names) {
+	auto bind = make_uniq<D1RawBindData>();
+	// args: account_id, api_token, database_id, table_name
+    if (input.inputs.size() < 4) {
+        throw BinderException("d1_scan requires 4 arguments: account_id, api_token, database_id, table_name");
+	}
+    bind->cfg.account_id = input.inputs[0].GetValue<string>();
+    bind->cfg.api_token = input.inputs[1].GetValue<string>();
+    bind->cfg.database_id = input.inputs[2].GetValue<string>();
+    string table_name = input.inputs[3].GetValue<string>();
+    
+    // Generate SQL to scan the table
+    bind->sql = "SELECT * FROM \"" + table_name + "\"";
+    bind->use_object = false; // Always use raw query for table scans
+    
+	// For bind, fetch one page to derive schema
+	CloudflareD1Client client(bind->cfg);
+	auto res = client.RawQuery(bind->sql, bind->params);
+	if (!res.success) {
+		throw BinderException("D1 scan bind failed: %s", res.error.c_str());
+	}
+	if (res.columns.empty() && !res.rows.empty()) {
+		// fabricate col names c0..cn
+		size_t cols = res.rows[0].size();
+		for (size_t i = 0; i < cols; i++) {
+			bind->names.push_back("c" + to_string(i));
+			bind->return_types.push_back(LogicalType::VARCHAR);
+		}
+	} else if (!res.columns.empty()) {
+		for (auto &c : res.columns) {
+			bind->names.push_back(c.name.empty() ? string("column") : c.name);
+			// Use comprehensive SQLite type mapping
+			LogicalType lt = MapSQLiteTypeToDuckDB(c.type);
 			bind->return_types.push_back(lt);
 		}
 	} else {

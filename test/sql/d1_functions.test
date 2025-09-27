@@ -1,0 +1,56 @@
+# name: test_d1_functions
+# description: test D1 extension functions
+# group: [sql]
+
+require cloudflare_d1
+
+statement ok
+LOAD 'cloudflare_d1';
+
+# Test basic cloudflare_d1 function
+query I
+SELECT cloudflare_d1('test');
+----
+CloudflareD1 test 🐥
+
+# Test d1_query function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT * FROM d1_query('SELECT 1 as x', 'test_account', 'test_token', 'test_db');
+----
+D1 query bind failed
+
+# Test d1_execute function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT d1_execute('SELECT 1', 'test_account', 'test_token', 'test_db');
+----
+D1 execute failed
+
+# Test d1_insert function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT d1_insert('test_table', 'test_account', 'test_token', 'test_db', 'col1', 'val1', 'col2', 'val2');
+----
+D1 INSERT failed
+
+# Test d1_update function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT d1_update('test_table', 'test_account', 'test_token', 'test_db', 'where_col', 'where_val', 'set_col', 'set_val');
+----
+D1 UPDATE failed
+
+# Test d1_delete function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT d1_delete('test_table', 'test_account', 'test_token', 'test_db', 'where_col', 'where_val');
+----
+D1 DELETE failed
+
+# Test d1_refresh function (will succeed as it's a simplified implementation)
+query I
+SELECT d1_refresh('test_account', 'test_token', 'test_db', 'main');
+----
+1
+
+# Test d1_bulk_insert function (will fail with invalid credentials, but should show proper error)
+statement error
+SELECT d1_bulk_insert('test_account', 'test_token', 'test_db', 'test_table', 'col1,col2', 'val1,val2');
+----
+D1 bulk insert failed

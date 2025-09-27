@@ -1,5 +1,6 @@
 #include "include/d1_storage.hpp"
 #include "include/d1_client.hpp"
+#include "include/d1_catalog.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
@@ -15,24 +16,7 @@
 
 namespace duckdb {
 
-// Minimal D1 Catalog: delegates reads to table function and writes to execute
-class D1Catalog : public DuckCatalog {
-public:
-	explicit D1Catalog(AttachedDatabase &db, CloudflareD1Config cfg, string db_name)
-	    : DuckCatalog(db), config(std::move(cfg)), name(std::move(db_name)) {}
-	string GetCatalogType() override { return "d1"; }
-
-public:
-	void Initialize(optional_ptr<ClientContext> context, bool load_builtin) override {
-		DuckCatalog::Initialize(load_builtin);
-		// Note: Cannot create views during initialization due to DuckDB constraints
-		// Remote tables will be accessible via manual view creation or utility functions
-	}
-
-private:
-	CloudflareD1Config config;
-	string name;
-};
+// Use the D1Catalog from d1_catalog.cpp
 
 // No custom storage info needed
 
@@ -45,6 +29,10 @@ static void ParseD1Config(const string &path, const unordered_map<string, Value>
     string rest = p;
     if (StringUtil::StartsWith(StringUtil::Lower(p), "d1:")) {
         rest = p.substr(3);
+        // Remove any leading slashes after d1:
+        while (StringUtil::StartsWith(rest, "/")) {
+            rest = rest.substr(1);
+        }
     }
     // Tokenize by both spaces and semicolons
     vector<string> tokens;
@@ -60,6 +48,7 @@ static void ParseD1Config(const string &path, const unordered_map<string, Value>
         }
     }
     if (!current.empty()) tokens.push_back(current);
+
     for (auto &kv : tokens) {
         auto eq = kv.find('=');
         if (eq == string::npos) continue;
@@ -85,6 +74,11 @@ static unique_ptr<Catalog> D1Attach(optional_ptr<StorageExtensionInfo> storage_i
                                     AttachedDatabase &db, const string &name, AttachInfo &info, AttachOptions &options) {
     CloudflareD1Config cfg;
     ParseD1Config(info.path, options.options, cfg);
+
+    // Debug: Print what credentials were parsed
+    fprintf(stderr, "D1Attach: path='%s', account_id='%s', api_token='%s', database_id='%s'\n",
+            info.path.c_str(), cfg.account_id.c_str(), cfg.api_token.c_str(), cfg.database_id.c_str());
+
     return make_uniq<D1Catalog>(db, cfg, name);
 }
 
