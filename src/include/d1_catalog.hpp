@@ -31,11 +31,13 @@ class D1TableSet;
 class D1Catalog : public DuckCatalog {
 public:
     D1Catalog(AttachedDatabase &db, CloudflareD1Config cfg, string db_name);
-    string GetCatalogType() override { return "d1"; }
+    string GetCatalogType() override { return "cloudflare_d1"; }
 
     void Initialize(optional_ptr<ClientContext> context, bool load_builtin) override;
 
     CloudflareD1Config &GetConfig() { return config; }
+
+    void CreateD1Views(ClientContext &context);
 
 
     // Phase 4: Catalog refresh methods
@@ -47,16 +49,42 @@ private:
     string db_name;
 };
 
+// Base class for D1 catalog sets - similar to PostgresCatalogSet
+class D1CatalogSet : public CatalogSet {
+public:
+    D1CatalogSet(Catalog &catalog, CloudflareD1Config cfg);
+
+    // Try to load entries if not already loaded
+    void TryLoadEntries(ClientContext &context);
+
+    // Load all entries
+    virtual void LoadEntries(ClientContext &context) = 0;
+
+    // Clear all entries
+    void ClearEntries();
+
+    // Check if entries are loaded
+    bool EntriesLoaded() const;
+
+    // Use the base CatalogSet implementation for CreateEntry
+
+protected:
+    CloudflareD1Config config;
+    std::atomic<bool> entries_loaded;
+    std::mutex load_lock;
+};
+
 // D1TableSet - manages D1 table entries like PostgresTableSet
-class D1TableSet : public CatalogSet {
+class D1TableSet : public D1CatalogSet {
 public:
     D1TableSet(Catalog &catalog, CloudflareD1Config cfg);
 
     // Load table metadata from D1
-    void LoadEntries(ClientContext &context);
+    void LoadEntries(ClientContext &context) override;
 
-private:
-    CloudflareD1Config config;
+    // Create a table entry from D1 metadata
+    unique_ptr<TableCatalogEntry> CreateTableEntry(ClientContext &context, SchemaCatalogEntry &schema,
+                                                  const string &table_name);
 };
 
 class D1Schema : public SchemaCatalogEntry {
@@ -70,6 +98,9 @@ public:
 
     // Get the D1TableSet for table management
     D1TableSet& GetTableSet() { return tables; }
+
+    // Load all entries for this schema
+    void LoadEntries(ClientContext &context);
 
     // Implement required pure virtual methods
     void Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
@@ -104,6 +135,9 @@ private:
     CatalogSet types;
 };
 
+// Forward declarations
+struct D1RawBindData;
+
 class D1TableEntry : public TableCatalogEntry {
 public:
     D1TableEntry(Catalog &catalog, SchemaCatalogEntry &schema, const string &table_name, CloudflareD1Config cfg);
@@ -117,8 +151,14 @@ public:
     static unique_ptr<CreateTableInfo> MakeCreateInfo(Catalog &catalog, SchemaCatalogEntry &schema,
                                                       const string &table_name, const CloudflareD1Config &cfg);
 
+    // Get the column information for this table
+    void GetColumnInfo(ClientContext &context);
+
 private:
     CloudflareD1Config config;
+
+    // Original D1/SQLite types for each column
+    vector<string> d1_types;
 };
 
 } // namespace duckdb

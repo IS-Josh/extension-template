@@ -37,6 +37,7 @@ public:
 
 	CloudflareD1QueryResult RawQuery(const std::string &sql, const std::vector<CloudflareD1QueryParam> &params);
 	CloudflareD1QueryResult ObjectQuery(const std::string &sql, const std::vector<CloudflareD1QueryParam> &params);
+	const CloudflareD1Config& GetConfig() const;
 
 private:
 	struct Impl;

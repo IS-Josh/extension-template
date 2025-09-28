@@ -26,6 +26,7 @@ set(EXTENSION_SOURCES
   src/d1_functions_catalog.cpp
   src/d1_functions_attach.cpp
   src/d1_functions_bulk.cpp
+  src/d1_secret.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

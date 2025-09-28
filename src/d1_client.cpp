@@ -158,6 +158,10 @@ CloudflareD1QueryResult CloudflareD1Client::ObjectQuery(const std::string &sql, 
     return impl->PostJson(path, body_str);
 }
 
+const CloudflareD1Config& CloudflareD1Client::GetConfig() const {
+	return impl->config;
+}
+
 }
 
 
