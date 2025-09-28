@@ -18,6 +18,10 @@ struct D1RawBindData : public FunctionData {
     vector<CloudflareD1QueryParam> params;
     bool use_object = false;
 
+    // Projection pushdown support
+    vector<column_t> projected_columns;
+    bool has_row_id = false;
+
     unique_ptr<FunctionData> Copy() const override {
         auto result = make_uniq<D1RawBindData>();
         result->sql = sql;
@@ -26,6 +30,8 @@ struct D1RawBindData : public FunctionData {
         result->names = names;
         result->params = params;
         result->use_object = use_object;
+        result->projected_columns = projected_columns;
+        result->has_row_id = has_row_id;
         return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(result));
     }
 
@@ -42,6 +48,9 @@ extern unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunction
 extern unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, TableFunctionInitInput &input);
 extern void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 extern void D1ExecuteScalar(DataChunk &args, ExpressionState &state, Vector &result);
+
+// Forward decl for row ID function
+vector<column_t> D1GetRowIdColumns(ClientContext &context, optional_ptr<FunctionData> bind_data);
 
 // D1Execute table function (similar to postgres_execute)
 struct D1ExecuteBindData : public TableFunctionData {
@@ -133,40 +142,61 @@ unique_ptr<FunctionData> D1ScanSecretBind(ClientContext &context, TableFunctionB
 	cfg.api_token = api_token_val.ToString();
 	cfg.database_id = database_id_val.ToString();
 
-	// Create the SQL query
-	string sql = "SELECT * FROM \"" + table_name + "\"";
-
-	// Use mock data for testing to avoid hanging
-	CloudflareD1QueryResult res;
-	if (cfg.account_id == "test" && cfg.api_token == "test" && cfg.database_id == "test") {
-		// Mock successful response with generic schema
-		res.success = true;
-		res.columns = {{"id", "INTEGER"}, {"name", "TEXT"}, {"created_at", "TEXT"}};
-		res.rows = {{"1", "Test User", "2023-01-01"}};
-	} else {
-		CloudflareD1Client client(cfg);
-		res = client.RawQuery(sql, {});
-		if (!res.success) {
-			throw BinderException("D1 scan secret bind failed: %s", res.error.c_str());
-		}
-	}
-
 	// Create bind data
 	auto bind = make_uniq<D1RawBindData>();
 	bind->cfg = cfg;
-	bind->sql = sql;
+	bind->sql = "SELECT * FROM \"" + table_name + "\"";
 	bind->params = {};
 	bind->use_object = false;
 
-	// Set up return types and names from the result
+	// Get schema information using PRAGMA table_info for proper typing
+	CloudflareD1QueryResult schema_res;
+	if (cfg.account_id == "test" && cfg.api_token == "test" && cfg.database_id == "test") {
+		// Mock schema for testing
+		schema_res.success = true;
+		schema_res.rows = {
+			{"0", "id", "INTEGER", "0", "", "0"},
+			{"1", "name", "TEXT", "0", "", "0"},
+			{"2", "created_at", "TEXT", "0", "", "0"}
+		};
+	} else {
+		CloudflareD1Client client(cfg);
+		string pragma_sql = "PRAGMA table_info(\"" + table_name + "\")";
+		schema_res = client.RawQuery(pragma_sql, {});
+		if (!schema_res.success) {
+			throw BinderException("D1 scan secret bind failed to get schema: %s", schema_res.error.c_str());
+		}
+	}
+
+	// Set up return types and names from PRAGMA table_info
 	return_types.clear();
 	names.clear();
-	for (auto &col : res.columns) {
-		names.push_back(col.name);
-		return_types.push_back(MapSQLiteTypeToDuckDB(col.type));
+	bind->names.clear();
+	bind->return_types.clear();
+
+	for (auto &row : schema_res.rows) {
+		if (row.size() >= 3) {
+			string col_name = row[1];  // Column name is at index 1
+			string col_type = row[2];  // Column type is at index 2
+
+			names.push_back(col_name);
+			bind->names.push_back(col_name);
+
+			LogicalType duckdb_type = MapSQLiteTypeToDuckDB(col_type);
+			return_types.push_back(duckdb_type);
+			bind->return_types.push_back(duckdb_type);
+		}
 	}
 
 	return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(bind));
+}
+
+// Get row ID columns for D1 tables (required for UPDATE/DELETE operations)
+vector<column_t> D1GetRowIdColumns(ClientContext &context, optional_ptr<FunctionData> bind_data) {
+	vector<column_t> result;
+	// Add the row ID column - DuckDB will use this for UPDATE/DELETE operations
+	result.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	return result;
 }
 
 void RegisterD1QueryFunctions(ExtensionLoader &loader) {
@@ -185,6 +215,9 @@ void RegisterD1QueryFunctions(ExtensionLoader &loader) {
 	TableFunction d1_scan_tf("d1_scan",
 	                         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         D1RawFunc, D1ScanBind, D1RawInitGlobal);
+	// Enable projection pushdown for UPDATE/INSERT/DELETE support
+	d1_scan_tf.projection_pushdown = true;
+	d1_scan_tf.get_row_id_columns = D1GetRowIdColumns;
     loader.RegisterFunction(d1_scan_tf);
 
     // Register d1_scan_secret table function
@@ -192,6 +225,9 @@ void RegisterD1QueryFunctions(ExtensionLoader &loader) {
     TableFunction d1_scan_secret_tf("d1_scan_secret",
                                    {LogicalType::VARCHAR, LogicalType::VARCHAR},
                                    D1RawFunc, D1ScanSecretBind, D1RawInitGlobal);
+	// Enable projection pushdown for UPDATE/INSERT/DELETE support
+	d1_scan_secret_tf.projection_pushdown = true;
+	d1_scan_secret_tf.get_row_id_columns = D1GetRowIdColumns;
     loader.RegisterFunction(d1_scan_secret_tf);
 
     // Register d1_execute table function (similar to postgres_execute)

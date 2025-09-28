@@ -11,6 +11,23 @@
 #include <duckdb/parser/parsed_data/create_table_function_info.hpp>
 #include <duckdb/common/types/uuid.hpp>
 #include <duckdb/common/string_util.hpp>
+#include "include/d1_batch_operations.hpp"
+#include "include/d1_predicate_pushdown.hpp"
+#include "include/d1_connection_pool.hpp"
+#include "include/d1_streaming.hpp"
+#include "include/d1_analytics.hpp"
+#include "include/d1_pipeline.hpp"
+
+// Forward declarations for Phase 4 & 5 functions
+namespace duckdb {
+    void RegisterD1Metrics(ExtensionLoader &loader);
+}
+
+// Forward declaration for validation function
+namespace duckdb {
+    CloudflareD1QueryResult ExecuteValidatedD1Query(CloudflareD1Client &client, const string &sql,
+                                                   const vector<CloudflareD1QueryParam> &params);
+}
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
@@ -197,6 +214,11 @@ struct D1RawGlobalState : public GlobalTableFunctionState {
 	std::vector<CloudflareD1QueryParam> params;
 	bool query_executed = false;
 
+	// Projection pushdown support
+	vector<column_t> column_ids;
+	vector<ColumnIndex> column_indexes;
+	bool has_row_id = false;
+
 	// Constructor for D1ScanBindData
     explicit D1RawGlobalState(const CloudflareD1Config &cfg)
         : client(cfg), use_object(false) {
@@ -221,7 +243,22 @@ unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, Tab
     state->params = bind.params;
     state->use_object = bind.use_object;
     state->query_executed = false;
-    fprintf(stderr, "D1RawInitGlobal: Returning state\n");
+
+    // Capture projection information for projection pushdown
+    state->column_ids = input.column_ids;
+    state->column_indexes = input.column_indexes;
+
+    // Check if row ID is requested (needed for UPDATE/DELETE operations)
+    for (auto &col_idx : input.column_indexes) {
+        if (col_idx.IsRowIdColumn()) {
+            state->has_row_id = true;
+            fprintf(stderr, "D1RawInitGlobal: Row ID column requested for UPDATE/DELETE support\n");
+            break;
+        }
+    }
+
+    fprintf(stderr, "D1RawInitGlobal: Projection - %zu columns, has_row_id: %s\n",
+            input.column_ids.size(), state->has_row_id ? "true" : "false");
     return state;
 }
 
@@ -261,20 +298,39 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
         throw InvalidInputException("D1 raw query failed: %s", state.res.error.c_str());
     }
 
-    idx_t out_cols = output.ColumnCount();
+    // Handle projection pushdown - only return requested columns
+    idx_t output_col_idx = 0;
     idx_t count = 0;
+
     while (count < STANDARD_VECTOR_SIZE && state.row_idx < state.res.rows.size()) {
-        auto &row = state.res.rows[state.row_idx++];
-        for (idx_t c = 0; c < out_cols; c++) {
-            const std::string cell = c < row.size() ? row[c] : std::string();
-            // Convert string to appropriate value based on column type
-            auto target_type = output.data[c].GetType();
-            // Use Value constructor for now
-            output.SetValue(c, count, Value(cell));
+        auto &row = state.res.rows[state.row_idx];
+        output_col_idx = 0;
+
+        // Process each requested column based on projection
+        for (auto &col_idx : state.column_indexes) {
+            if (col_idx.IsRowIdColumn()) {
+                // Generate row ID for UPDATE/DELETE operations
+                // Use the current row index as the row ID
+                output.SetValue(output_col_idx, count, Value::BIGINT(static_cast<int64_t>(state.row_idx)));
+                fprintf(stderr, "D1RawFunc: Generated row ID %zu for row %zu\n", state.row_idx, count);
+            } else {
+                // Regular column - get from D1 result
+                auto primary_col_idx = col_idx.GetPrimaryIndex();
+                const std::string cell = primary_col_idx < row.size() ? row[primary_col_idx] : std::string();
+
+                // Convert string to appropriate value based on column type
+                auto target_type = output.data[output_col_idx].GetType();
+                output.SetValue(output_col_idx, count, Value(cell));
+            }
+            output_col_idx++;
         }
+
+        state.row_idx++;
         count++;
     }
+
     output.SetCardinality(count);
+    fprintf(stderr, "D1RawFunc: Returned %zu rows with %zu columns (projection pushdown)\n", count, output_col_idx);
 }
 
 // --- Catalog functions
@@ -409,24 +465,45 @@ void D1AttachFunc(ClientContext &context, TableFunctionInput &input, DataChunk &
 	output.SetCardinality(count);
 }
 
-// Execute function: returns number of changes
+// Execute function: returns number of changes with enhanced error handling
 void D1ExecuteScalar(DataChunk &args, ExpressionState &state, Vector &result) {
     // args: sql, account_id, api_token, database_id
     if (args.ColumnCount() < 4) {
         throw InvalidInputException("d1_execute requires: sql, account_id, api_token, database_id");
     }
+
     string sql = args.data[0].GetValue(0).ToString();
     CloudflareD1Config cfg;
     cfg.account_id = args.data[1].GetValue(0).ToString();
     cfg.api_token = args.data[2].GetValue(0).ToString();
     cfg.database_id = args.data[3].GetValue(0).ToString();
-	CloudflareD1Client client(cfg);
-	auto res = client.ObjectQuery(sql, {});
-	if (!res.success) {
-		throw InvalidInputException("d1_execute failed: %s", res.error.c_str());
-	}
-	int64_t changes = res.changes;
-    result.SetValue(0, Value::BIGINT(changes));
+
+    // Validate inputs
+    if (sql.empty()) {
+        throw InvalidInputException("d1_execute: SQL query cannot be empty");
+    }
+    if (cfg.account_id.empty() || cfg.api_token.empty() || cfg.database_id.empty()) {
+        throw InvalidInputException("d1_execute: account_id, api_token, and database_id cannot be empty");
+    }
+
+    fprintf(stderr, "D1ExecuteScalar: Executing SQL: %s\n", sql.c_str());
+
+    try {
+        CloudflareD1Client client(cfg);
+        // Use enhanced validation and execution
+        auto res = ExecuteValidatedD1Query(client, sql, {});
+
+        if (!res.success) {
+            throw InvalidInputException("%s", res.error.c_str());
+        }
+
+        int64_t changes = res.changes;
+        fprintf(stderr, "D1ExecuteScalar: Successfully executed, %lld rows affected\n", (long long)changes);
+        result.SetValue(0, Value::BIGINT(changes));
+
+    } catch (const std::exception &e) {
+        throw InvalidInputException("D1 execution error: %s", e.what());
+    }
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -444,6 +521,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterD1AttachFunctions(loader);
 	RegisterD1BulkFunctions(loader);
 	RegisterD1SecretFunctions(loader);
+	RegisterD1BatchOperations(loader);
+	RegisterD1PredicatePushdown(loader);
+	RegisterD1ConnectionPool(loader);
+	RegisterD1Metrics(loader);
+	RegisterD1Streaming(loader);
+	RegisterD1Analytics(loader);
+	RegisterD1Pipeline(loader);
 
     // Register storage extension for ATTACH ... (TYPE d1)
     auto &db = loader.GetDatabaseInstance();

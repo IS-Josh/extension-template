@@ -147,6 +147,7 @@ public:
     // Implement pure virtual methods from TableCatalogEntry
     unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
     TableStorageInfo GetStorageInfo(ClientContext &context) override;
+    DataTable &GetStorage() override;
 
     static unique_ptr<CreateTableInfo> MakeCreateInfo(Catalog &catalog, SchemaCatalogEntry &schema,
                                                       const string &table_name, const CloudflareD1Config &cfg);

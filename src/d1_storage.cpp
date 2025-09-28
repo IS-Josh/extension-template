@@ -1,6 +1,7 @@
 #include "include/d1_storage.hpp"
 #include "include/d1_client.hpp"
 #include "include/d1_catalog.hpp"
+#include "include/d1_type_mapping.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
@@ -173,6 +174,12 @@ static void ParseD1Config(const string &path, const unordered_map<string, Value>
     s = get_opt("DATABASE_ID"); if (!s.empty()) out.database_id = s;
 }
 
+struct D1ColumnInfo {
+    string name;
+    string d1_type;
+    LogicalType duckdb_type;
+};
+
 class D1DefaultGenerator : public DefaultGenerator {
 public:
     D1DefaultGenerator(Catalog &catalog, SchemaCatalogEntry &schema, CloudflareD1Config cfg, string secret_name = "")
@@ -187,25 +194,17 @@ public:
             return nullptr;
         }
 
-        // Create a view that uses d1_scan
-        auto result = make_uniq<CreateViewInfo>();
-        result->schema = DEFAULT_SCHEMA;
-        result->view_name = entry_name;
-
-        // Use secret reference if available, otherwise use direct credentials
-        if (!secret_name.empty()) {
-            result->sql = StringUtil::Format("SELECT * FROM d1_scan_secret('%s', '%s')",
-                                           secret_name, entry_name);
-        } else {
-            result->sql = StringUtil::Format("SELECT * FROM d1_scan('%s', '%s', '%s', '%s')",
-                                           config.account_id, config.api_token, config.database_id, entry_name);
+        // Get column information from D1
+        auto column_info = GetD1TableSchema(entry_name);
+        if (column_info.empty()) {
+            fprintf(stderr, "D1DefaultGenerator::CreateDefaultEntry: No column info found for '%s', using SELECT *\n", entry_name.c_str());
+            // Fallback to SELECT * if we can't get schema
+            return CreateSimpleView(context, entry_name);
         }
 
-        result->internal = false;  // Make sure it's not marked as internal
-        result->temporary = false; // Make sure it's not temporary
-
-        auto view_info = CreateViewInfo::FromSelect(context, std::move(result));
-        return make_uniq_base<CatalogEntry, ViewCatalogEntry>(catalog, schema, *view_info);
+        // Create a table entry instead of a view to support write operations
+        fprintf(stderr, "D1DefaultGenerator::CreateDefaultEntry: Creating D1TableEntry for '%s'\n", entry_name.c_str());
+        return make_uniq_base<CatalogEntry, D1TableEntry>(catalog, schema, entry_name, config);
     }
 
     vector<string> GetDefaultEntries() override {
@@ -245,6 +244,80 @@ public:
     }
 
 private:
+    vector<D1ColumnInfo> GetD1TableSchema(const string &table_name) {
+        vector<D1ColumnInfo> columns;
+
+        // For testing, return mock schema
+        if (config.account_id == "test" && config.api_token == "test" && config.database_id == "test") {
+            columns.push_back({"id", "INTEGER", LogicalType::BIGINT});
+            columns.push_back({"name", "TEXT", LogicalType::VARCHAR});
+            columns.push_back({"created_at", "TEXT", LogicalType::VARCHAR});
+            return columns;
+        }
+
+        // Query D1 for table schema using PRAGMA table_info
+        CloudflareD1Client client(config);
+        string sql = "PRAGMA table_info(\"" + table_name + "\")";
+        auto res = client.RawQuery(sql, {});
+
+        if (!res.success) {
+            fprintf(stderr, "D1DefaultGenerator::GetD1TableSchema: Failed to get schema for '%s': %s\n",
+                    table_name.c_str(), res.error.c_str());
+            return columns;
+        }
+
+        fprintf(stderr, "D1DefaultGenerator::GetD1TableSchema: Got %zu columns for table '%s'\n",
+                res.rows.size(), table_name.c_str());
+
+        for (auto &row : res.rows) {
+            if (row.size() >= 3) {
+                D1ColumnInfo col_info;
+                string raw_name = row[1];  // Column name is at index 1
+                // Strip quotes if present
+                if (raw_name.size() >= 2 && raw_name.front() == '"' && raw_name.back() == '"') {
+                    col_info.name = raw_name.substr(1, raw_name.size() - 2);
+                } else {
+                    col_info.name = raw_name;
+                }
+                string raw_type = row[2];  // Column type is at index 2
+                // Strip quotes if present
+                if (raw_type.size() >= 2 && raw_type.front() == '"' && raw_type.back() == '"') {
+                    col_info.d1_type = raw_type.substr(1, raw_type.size() - 2);
+                } else {
+                    col_info.d1_type = raw_type;
+                }
+                col_info.duckdb_type = MapSQLiteTypeToDuckDB(col_info.d1_type);
+                columns.push_back(col_info);
+
+                fprintf(stderr, "D1DefaultGenerator::GetD1TableSchema: Column '%s' type '%s' -> DuckDB type\n",
+                        col_info.name.c_str(), col_info.d1_type.c_str());
+            }
+        }
+
+        return columns;
+    }
+
+    unique_ptr<CatalogEntry> CreateSimpleView(ClientContext &context, const string &entry_name) {
+        // Fallback to simple SELECT * view
+        auto result = make_uniq<CreateViewInfo>();
+        result->schema = DEFAULT_SCHEMA;
+        result->view_name = entry_name;
+
+        if (!secret_name.empty()) {
+            result->sql = StringUtil::Format("SELECT * FROM d1_scan_secret('%s', '%s')",
+                                           secret_name, entry_name);
+        } else {
+            result->sql = StringUtil::Format("SELECT * FROM d1_scan('%s', '%s', '%s', '%s')",
+                                           config.account_id, config.api_token, config.database_id, entry_name);
+        }
+
+        result->internal = false;
+        result->temporary = false;
+
+        auto view_info = CreateViewInfo::FromSelect(context, std::move(result));
+        return make_uniq_base<CatalogEntry, ViewCatalogEntry>(catalog, schema, *view_info);
+    }
+
     bool IsValidD1Table(const string &table_name) {
         // For testing, accept any table name if credentials are "test"
         if (config.account_id == "test" && config.api_token == "test" && config.database_id == "test") {

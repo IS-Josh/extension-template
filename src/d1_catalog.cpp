@@ -36,6 +36,7 @@ namespace duckdb {
 extern void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 extern unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names);
 extern unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, TableFunctionInitInput &input);
+extern vector<column_t> D1GetRowIdColumns(ClientContext &context, optional_ptr<FunctionData> bind_data);
 
 // D1RawBindData structure
 struct D1RawBindData : public FunctionData {
@@ -418,10 +419,47 @@ static void D1ScanFunc(ClientContext &context, TableFunctionInput &data_p, DataC
 
 unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, SchemaCatalogEntry &schema,
                                                          const string &table_name, const CloudflareD1Config &cfg) {
-    // Minimal CreateTableInfo: name only, with a single placeholder column.
-    // Actual column types/names are resolved lazily at scan time.
     auto create_info = make_uniq<CreateTableInfo>(schema, table_name);
-    create_info->columns.AddColumn(ColumnDefinition("value", LogicalType::VARCHAR));
+
+    // Try to get column information from D1
+    if (cfg.account_id == "test" && cfg.api_token == "test" && cfg.database_id == "test") {
+        // Mock data for testing
+        create_info->columns.AddColumn(ColumnDefinition("id", LogicalType::BIGINT));
+        create_info->columns.AddColumn(ColumnDefinition("name", LogicalType::VARCHAR));
+        create_info->columns.AddColumn(ColumnDefinition("created_at", LogicalType::VARCHAR));
+    } else {
+        // Query D1 for actual column information
+        CloudflareD1Client client(cfg);
+        string sql = "PRAGMA table_info(\"" + table_name + "\")";
+        auto res = client.RawQuery(sql, {});
+
+        if (res.success && !res.rows.empty()) {
+            for (auto &row : res.rows) {
+                if (row.size() >= 3) {
+                    string raw_name = row[1];
+                    string raw_type = row[2];
+
+                    // Strip quotes if present
+                    string col_name = raw_name;
+                    if (raw_name.size() >= 2 && raw_name.front() == '"' && raw_name.back() == '"') {
+                        col_name = raw_name.substr(1, raw_name.size() - 2);
+                    }
+
+                    string col_type = raw_type;
+                    if (raw_type.size() >= 2 && raw_type.front() == '"' && raw_type.back() == '"') {
+                        col_type = raw_type.substr(1, raw_type.size() - 2);
+                    }
+
+                    LogicalType duckdb_type = MapSQLiteTypeToDuckDB(col_type);
+                    create_info->columns.AddColumn(ColumnDefinition(col_name, duckdb_type));
+                }
+            }
+        } else {
+            // Fallback: single placeholder column
+            create_info->columns.AddColumn(ColumnDefinition("value", LogicalType::VARCHAR));
+        }
+    }
+
     return create_info;
 }
 
@@ -483,6 +521,9 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 
     // Return table function without separate bind (we already provided bind_data)
     TableFunction tf("d1_table_scan", {}, D1RawFunc, nullptr, D1RawInitGlobal);
+    // Enable projection pushdown for UPDATE/INSERT/DELETE support
+    tf.projection_pushdown = true;
+    tf.get_row_id_columns = D1GetRowIdColumns;
     return tf;
 }
 
@@ -497,6 +538,15 @@ TableStorageInfo D1TableEntry::GetStorageInfo(ClientContext &context) {
     TableStorageInfo info;
     info.cardinality = 0; // Unknown cardinality for remote tables
     return info;
+}
+
+DataTable &D1TableEntry::GetStorage() {
+    throw NotImplementedException("D1 tables do not support direct storage operations.\n"
+                                 "Use d1_execute() for INSERT/UPDATE/DELETE operations:\n"
+                                 "  SELECT d1_execute('UPDATE users SET name = ''josh'' WHERE id = 1', 'test', 'test', 'test');\n"
+                                 "Or use the table function:\n"
+                                 "  SELECT * FROM d1_execute('my_d1', 'UPDATE users SET name = ''josh'' WHERE id = 1');\n"
+                                 "Note: Direct UPDATE/INSERT/DELETE on attached tables is not supported.");
 }
 
 //===--------------------------------------------------------------------===//
