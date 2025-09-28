@@ -24,6 +24,9 @@
 
 namespace duckdb {
 
+// Forward declaration
+class D1DataTable;
+
 class D1Schema;
 class D1TableEntry;
 class D1TableSet;
@@ -155,8 +158,14 @@ public:
     // Get the column information for this table
     void GetColumnInfo(ClientContext &context);
 
+    // Phase A: Get D1DataTable for internal operations
+    D1DataTable* GetD1Storage();
+
 private:
     CloudflareD1Config config;
+
+    // D1DataTable for direct storage operations (Phase A & B)
+    mutable unique_ptr<D1DataTable> storage;
 
     // Original D1/SQLite types for each column
     vector<string> d1_types;

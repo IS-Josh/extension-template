@@ -21,6 +21,7 @@ set(EXTENSION_SOURCES
   src/d1_client.cpp
   src/d1_storage.cpp
   src/d1_catalog.cpp
+  src/d1_data_table.cpp
   src/d1_type_mapping.cpp
   src/d1_functions_query.cpp
   src/d1_functions_catalog.cpp

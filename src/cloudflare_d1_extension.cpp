@@ -17,6 +17,7 @@
 #include "include/d1_streaming.hpp"
 #include "include/d1_analytics.hpp"
 #include "include/d1_pipeline.hpp"
+#include "include/d1_type_mapping.hpp"
 
 // Forward declarations for Phase 4 & 5 functions
 namespace duckdb {
@@ -129,7 +130,7 @@ unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInpu
 		for (auto &c : res.columns) {
 			bind->names.push_back(c.name.empty() ? string("column") : c.name);
 			// Use comprehensive SQLite type mapping
-			LogicalType lt = MapSQLiteTypeToDuckDB(c.type);
+                        LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
 			bind->return_types.push_back(lt);
 		}
 	} else {
@@ -188,7 +189,7 @@ unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunctionBindInp
 		for (auto &c : res.columns) {
 			bind->names.push_back(c.name.empty() ? string("column") : c.name);
 			// Use comprehensive SQLite type mapping
-			LogicalType lt = MapSQLiteTypeToDuckDB(c.type);
+                        LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
 			bind->return_types.push_back(lt);
 		}
 	} else {

@@ -182,7 +182,7 @@ unique_ptr<FunctionData> D1ScanSecretBind(ClientContext &context, TableFunctionB
 			names.push_back(col_name);
 			bind->names.push_back(col_name);
 
-			LogicalType duckdb_type = MapSQLiteTypeToDuckDB(col_type);
+                        LogicalType duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_type);
 			return_types.push_back(duckdb_type);
 			bind->return_types.push_back(duckdb_type);
 		}

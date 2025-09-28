@@ -1,5 +1,6 @@
 #include "include/d1_catalog.hpp"
 #include "include/d1_client.hpp"
+#include "include/d1_data_table.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -409,7 +410,7 @@ static void D1ScanFunc(ClientContext &context, TableFunctionInput &data_p, DataC
         for (idx_t c = 0; c < cols; c++) {
             string cell = c < row.size() ? row[c] : string();
             // Use proper type conversion instead of treating everything as string
-            Value converted_value = ConvertStringToValue(cell, output.data[c].GetType());
+            Value converted_value = D1TypeMapping::ConvertStringToValue(cell, output.data[c].GetType());
             output.SetValue(c, count, converted_value);
         }
         count++;
@@ -450,7 +451,7 @@ unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, Schem
                         col_type = raw_type.substr(1, raw_type.size() - 2);
                     }
 
-                    LogicalType duckdb_type = MapSQLiteTypeToDuckDB(col_type);
+                    LogicalType duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_type);
                     create_info->columns.AddColumn(ColumnDefinition(col_name, duckdb_type));
                 }
             }
@@ -509,7 +510,7 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
             string col_name = r[1];
             string col_type = r[2];
             d1_bind_data->names.push_back(col_name);
-            d1_bind_data->return_types.push_back(MapSQLiteTypeToDuckDB(col_type));
+            d1_bind_data->return_types.push_back(D1TypeMapping::MapD1TypeToDuckDB(col_type));
         }
     } else {
         // Fallback: single column
@@ -541,12 +542,26 @@ TableStorageInfo D1TableEntry::GetStorageInfo(ClientContext &context) {
 }
 
 DataTable &D1TableEntry::GetStorage() {
-    throw NotImplementedException("D1 tables do not support direct storage operations.\n"
+    // Phase B: For now, throw a more informative error message
+    // The challenge is that DataTable methods are not virtual, so we can't easily override them
+    // This would require a more complex approach involving custom storage integration
+    throw NotImplementedException("D1 tables do not support direct storage operations yet.\n"
+                                 "Phase B implementation requires deeper integration with DuckDB's storage layer.\n"
                                  "Use d1_execute() for INSERT/UPDATE/DELETE operations:\n"
-                                 "  SELECT d1_execute('UPDATE users SET name = ''josh'' WHERE id = 1', 'test', 'test', 'test');\n"
-                                 "Or use the table function:\n"
-                                 "  SELECT * FROM d1_execute('my_d1', 'UPDATE users SET name = ''josh'' WHERE id = 1');\n"
-                                 "Note: Direct UPDATE/INSERT/DELETE on attached tables is not supported.");
+                                 "  SELECT d1_execute('INSERT INTO users (name) VALUES (''John'')', 'account', 'token', 'db');\n"
+                                 "  SELECT d1_execute('UPDATE users SET name = ''Jane'' WHERE id = 1', 'account', 'token', 'db');\n"
+                                 "  SELECT d1_execute('DELETE FROM users WHERE id = 1', 'account', 'token', 'db');\n"
+                                 "\n"
+                                 "The D1DataTable infrastructure is in place for future implementation.");
+}
+
+// Phase A: Add method to get D1DataTable for internal operations
+D1DataTable* D1TableEntry::GetD1Storage() {
+    if (!storage) {
+        fprintf(stderr, "D1TableEntry::GetD1Storage: Creating D1DataTable for table '%s'\n", name.c_str());
+        storage = make_uniq<D1DataTable>(schema.name, name, config);
+    }
+    return storage.get();
 }
 
 //===--------------------------------------------------------------------===//
@@ -600,7 +615,7 @@ void D1Catalog::CreateD1Views(ClientContext &context) {
         res.rows = {{"users"}, {"products"}, {"orders"}};
     } else {
         // Query D1 for table names
-        CloudflareD1Client client(config);
+    CloudflareD1Client client(config);
         res = client.RawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_cf_KV'", {});
     }
 

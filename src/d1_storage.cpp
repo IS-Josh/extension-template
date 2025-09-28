@@ -286,7 +286,7 @@ private:
                 } else {
                     col_info.d1_type = raw_type;
                 }
-                col_info.duckdb_type = MapSQLiteTypeToDuckDB(col_info.d1_type);
+                col_info.duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_info.d1_type);
                 columns.push_back(col_info);
 
                 fprintf(stderr, "D1DefaultGenerator::GetD1TableSchema: Column '%s' type '%s' -> DuckDB type\n",
