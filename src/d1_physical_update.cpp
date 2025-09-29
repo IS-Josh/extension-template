@@ -9,6 +9,7 @@
 #include "include/d1_physical_update.hpp"
 #include "include/d1_catalog.hpp"
 #include "include/d1_data_table.hpp"
+#include "include/d1_parameterized_query.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {

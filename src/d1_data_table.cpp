@@ -11,6 +11,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "include/d1_type_mapping.hpp"
+#include "include/d1_parameterized_query.hpp"
 
 namespace duckdb {
 
@@ -480,21 +481,25 @@ void D1DataTable::ExecuteInsert(const DataChunk &chunk) {
         fprintf(stderr, "\n");
     }
 
-    // Generate INSERT/UPSERT statements for each row
+    // Generate SECURE parameterized INSERT/UPSERT statements for each row
     for (idx_t row = 0; row < chunk.size(); row++) {
-        string insert_sql;
+        D1ParameterizedQuery parameterized_query;
 
         if (has_primary_key) {
-            // Use UPSERT for tables with primary keys
-            insert_sql = GenerateUpsertSQL(chunk, row);
-            fprintf(stderr, "D1DataTable: Generated UPSERT SQL: %s\n", insert_sql.c_str());
+            // Use SECURE UPSERT for tables with primary keys
+            parameterized_query = D1ParameterizedQuery::CreateUpsert(table_name, schema.column_names,
+                                                                     schema.primary_key_columns, chunk, row);
+            fprintf(stderr, "D1DataTable: Generated SECURE UPSERT SQL: %s\n", parameterized_query.GetSQL().c_str());
         } else {
-            // Use regular INSERT for tables without primary keys
-            insert_sql = GenerateInsertSQL(chunk, row);
-            fprintf(stderr, "D1DataTable: Generated INSERT SQL: %s\n", insert_sql.c_str());
+            // Use SECURE regular INSERT for tables without primary keys
+            parameterized_query = D1ParameterizedQuery::CreateInsert(table_name, schema.column_names, chunk, row);
+            fprintf(stderr, "D1DataTable: Generated SECURE INSERT SQL: %s\n", parameterized_query.GetSQL().c_str());
         }
 
-        append_state->AddInsertStatement(insert_sql);
+        fprintf(stderr, "D1DataTable: With %zu parameters (SQL injection safe!)\n", parameterized_query.GetParameters().size());
+
+        // Execute parameterized query immediately (secure!)
+        ExecuteParameterizedQuery(parameterized_query);
 
         // Generate row ID and register primary key mapping
         row_t row_id = D1RowIdManager::GetInstance().GenerateRowId(table_name);
@@ -597,6 +602,31 @@ void D1DataTable::ExecuteCustomDeleteSQL(const string &delete_sql) {
     if (!delete_state->batch_mode || delete_state->pending_delete_statements.size() >= 100) {
         ExecuteBatchOperations(delete_state->pending_delete_statements);
         delete_state->Clear();
+    }
+}
+
+void D1DataTable::ExecuteParameterizedQuery(const D1ParameterizedQuery &query) {
+    fprintf(stderr, "D1DataTable: ExecuteParameterizedQuery with %zu parameters\n", query.GetParameters().size());
+    fprintf(stderr, "D1DataTable: SQL: %s\n", query.GetSQL().c_str());
+
+    // Log parameters for debugging (safely)
+    for (const auto &param : query.GetParameters()) {
+        fprintf(stderr, "D1DataTable: Parameter %s = '%s'\n", param.name.c_str(), param.value.c_str());
+    }
+
+    try {
+        // Execute the parameterized query directly
+        auto result = client->RawQuery(query.GetSQL(), query.GetParameters());
+
+        if (!result.success) {
+            fprintf(stderr, "D1DataTable: Parameterized query failed: %s\n", result.error.c_str());
+            throw InvalidInputException("D1 parameterized query failed: %s", result.error.c_str());
+        } else {
+            fprintf(stderr, "D1DataTable: Parameterized query executed successfully (changes: %lld)\n", result.changes);
+        }
+    } catch (const std::exception &e) {
+        fprintf(stderr, "D1DataTable: Exception during parameterized query execution: %s\n", e.what());
+        throw;
     }
 }
 

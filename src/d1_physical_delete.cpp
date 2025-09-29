@@ -9,6 +9,7 @@
 #include "include/d1_physical_delete.hpp"
 #include "include/d1_catalog.hpp"
 #include "include/d1_data_table.hpp"
+#include "include/d1_parameterized_query.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {
@@ -53,24 +54,16 @@ SinkResultType D1PhysicalDelete::Sink(ExecutionContext &context, DataChunk &chun
         }
     }
 
-    fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Generating direct DELETE SQL for D1\n");
+    fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Generating SECURE parameterized DELETE for D1\n");
 
-    // Extract the actual values to build WHERE clause for DELETE
+    // Extract the actual values to build parameterized WHERE clause for DELETE
     if (chunk.ColumnCount() > 0) {
         for (idx_t row = 0; row < chunk.size(); row++) {
-            // Build DELETE SQL using the primary key values from the chunk
-            // For a simple case like "WHERE id = 8", the first column should contain the ID value
-            string delete_sql = "DELETE FROM \"" + d1_table.name + "\" WHERE ";
-
             // Get the schema to understand the primary key structure
             const auto &schema = d1_storage->GetSchema();
 
             if (schema.HasPrimaryKey() && !schema.primary_key_columns.empty()) {
-                // Use primary key columns to build WHERE clause
-                vector<string> conditions;
-
-                // For now, assume single primary key column and use first chunk column
-                // This handles the common case: DELETE FROM table WHERE id = value
+                // Use primary key columns to build parameterized WHERE clause
                 string pk_col = schema.primary_key_columns[0];
                 Value delete_value = chunk.GetValue(0, row);
 
@@ -78,27 +71,26 @@ SinkResultType D1PhysicalDelete::Sink(ExecutionContext &context, DataChunk &chun
                        pk_col.c_str(), delete_value.ToString().c_str(),
                        delete_value.type().ToString().c_str(), delete_value.IsNull() ? "true" : "false");
 
-                string condition = "\"" + pk_col + "\" = ";
-                if (delete_value.IsNull()) {
-                    condition += "NULL";
-                } else if (delete_value.type() == LogicalType::VARCHAR) {
-                    condition += "'" + delete_value.ToString() + "'";
-                } else {
-                    condition += delete_value.ToString();
-                }
+                // Create secure parameterized DELETE query
+                auto parameterized_query = D1ParameterizedQuery::CreateDelete(d1_table.name, pk_col, delete_value);
 
-                delete_sql += condition;
+                fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Generated SECURE DELETE SQL: %s\n",
+                       parameterized_query.GetSQL().c_str());
+                fprintf(stderr, "🔥 D1PhysicalDelete::Sink: With %zu parameters (SQL injection safe!)\n",
+                       parameterized_query.GetParameters().size());
+
+                // Execute the parameterized query (SQL injection safe!)
+                d1_storage->ExecuteParameterizedQuery(parameterized_query);
             } else {
                 // Fallback: no primary key, this shouldn't happen for D1 tables but handle gracefully
-                fprintf(stderr, "🔥 D1PhysicalDelete::Sink: No primary key found, using fallback WHERE clause\n");
-                delete_sql += "rowid = " + chunk.GetValue(0, row).ToString();
+                fprintf(stderr, "🔥 D1PhysicalDelete::Sink: No primary key found, using fallback parameterized query\n");
+                Value fallback_value = chunk.GetValue(0, row);
+                auto parameterized_query = D1ParameterizedQuery::CreateDelete(d1_table.name, "rowid", fallback_value);
+                d1_storage->ExecuteParameterizedQuery(parameterized_query);
             }
-
-            fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Generated DELETE SQL: %s\n", delete_sql.c_str());
-            d1_storage->ExecuteCustomDeleteSQL(delete_sql);
         }
 
-        fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Successfully processed %llu DELETE operations\n", chunk.size());
+        fprintf(stderr, "🔥 D1PhysicalDelete::Sink: Successfully processed %llu SECURE DELETE operations\n", chunk.size());
     } else {
         fprintf(stderr, "🔥 D1PhysicalDelete::Sink: No columns found in DELETE chunk\n");
     }

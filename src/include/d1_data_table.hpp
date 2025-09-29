@@ -15,6 +15,7 @@
 #include "duckdb/storage/table/delete_state.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "d1_client.hpp"
+#include "d1_parameterized_query.hpp"
 #include <unordered_map>
 
 namespace duckdb {
@@ -161,6 +162,7 @@ public:
     void ExecuteUpdate(Vector &row_ids, const vector<PhysicalIndex> &column_ids, const DataChunk &updates);
     void ExecuteCustomUpdateSQL(const string &update_sql);
     void ExecuteCustomDeleteSQL(const string &delete_sql);
+    void ExecuteParameterizedQuery(const D1ParameterizedQuery &query);
     idx_t ExecuteDelete(Vector &row_ids, idx_t count);
 
     // Batch operations
