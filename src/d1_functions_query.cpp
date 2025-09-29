@@ -176,11 +176,22 @@ unique_ptr<FunctionData> D1ScanSecretBind(ClientContext &context, TableFunctionB
 
 	for (auto &row : schema_res.rows) {
 		if (row.size() >= 3) {
-			string col_name = row[1];  // Column name is at index 1
-			string col_type = row[2];  // Column type is at index 2
+			string raw_col_name = row[1];  // Column name is at index 1
+			string raw_col_type = row[2];  // Column type is at index 2
 
-			names.push_back(col_name);
-			bind->names.push_back(col_name);
+			// Strip quotes to match DuckDB table schema column names
+			string col_name = raw_col_name;
+			if (raw_col_name.size() >= 2 && raw_col_name.front() == '"' && raw_col_name.back() == '"') {
+				col_name = raw_col_name.substr(1, raw_col_name.size() - 2);
+			}
+
+			string col_type = raw_col_type;
+			if (raw_col_type.size() >= 2 && raw_col_type.front() == '"' && raw_col_type.back() == '"') {
+				col_type = raw_col_type.substr(1, raw_col_type.size() - 2);
+			}
+
+			names.push_back(col_name);  // Now consistent with table schema
+			bind->names.push_back(col_name);  // Now consistent with table schema
 
                         LogicalType duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_type);
 			return_types.push_back(duckdb_type);

@@ -6,6 +6,7 @@
 #include "include/d1_physical_insert.hpp"
 #include "include/d1_physical_update.hpp"
 #include "include/d1_physical_delete.hpp"
+
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -53,6 +54,11 @@ struct D1RawBindData : public FunctionData {
     vector<CloudflareD1QueryParam> params;
     bool use_object = false;
 
+    // Filter pushdown support
+    string table_name;  // Store table name for filter pushdown
+    vector<CloudflareD1QueryParam> filter_params;  // Parameters from pushed down filters
+    string where_clause;  // Parameterized WHERE clause
+
     unique_ptr<FunctionData> Copy() const override {
         auto result = make_uniq<D1RawBindData>();
         result->sql = sql;
@@ -61,6 +67,9 @@ struct D1RawBindData : public FunctionData {
         result->names = names;
         result->params = params;
         result->use_object = use_object;
+        result->table_name = table_name;
+        result->filter_params = filter_params;
+        result->where_clause = where_clause;
         return std::move(result);
     }
 
@@ -439,7 +448,19 @@ unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, Schem
         string sql = "PRAGMA table_info(\"" + table_name + "\")";
         auto res = client.RawQuery(sql, {});
 
+        fprintf(stderr, "🏗️ D1TableEntry::MakeCreateInfo: PRAGMA table_info returned %zu rows\n", res.rows.size());
+        for (size_t i = 0; i < res.rows.size(); i++) {
+            const auto &row = res.rows[i];
+            fprintf(stderr, "🏗️ PRAGMA row[%zu]: [", i);
+            for (size_t j = 0; j < row.size(); j++) {
+                if (j > 0) fprintf(stderr, ", ");
+                fprintf(stderr, "'%s'", row[j].c_str());
+            }
+            fprintf(stderr, "]\n");
+        }
+
         if (res.success && !res.rows.empty()) {
+            size_t col_index = 0;
             for (auto &row : res.rows) {
                 if (row.size() >= 3) {
                     string raw_name = row[1];
@@ -458,6 +479,10 @@ unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, Schem
 
                     LogicalType duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_type);
                     create_info->columns.AddColumn(ColumnDefinition(col_name, duckdb_type));
+
+                    fprintf(stderr, "🏗️ D1TableEntry::MakeCreateInfo: Added catalog column[%zu]: '%s' type: %s\n",
+                           col_index, col_name.c_str(), col_type.c_str());
+                    col_index++;
                 }
             }
         } else {
@@ -505,17 +530,47 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
     d1_bind_data->sql = "SELECT * FROM \"" + name + "\"";
     d1_bind_data->cfg = config;
     d1_bind_data->use_object = false;
+    d1_bind_data->table_name = name;  // Store table name for filter pushdown
 
     // Fetch column info lazily now
     CloudflareD1Client client(config);
     auto pragma = client.RawQuery("PRAGMA table_info(\"" + name + "\")", {});
+
+    fprintf(stderr, "🔗 D1TableEntry::GetScanFunction: PRAGMA table_info returned %zu rows\n", pragma.rows.size());
+    for (size_t i = 0; i < pragma.rows.size(); i++) {
+        const auto &row = pragma.rows[i];
+        fprintf(stderr, "🔗 PRAGMA row[%zu]: [", i);
+        for (size_t j = 0; j < row.size(); j++) {
+            if (j > 0) fprintf(stderr, ", ");
+            fprintf(stderr, "'%s'", row[j].c_str());
+        }
+        fprintf(stderr, "]\n");
+    }
+
     if (pragma.success && !pragma.rows.empty()) {
+        size_t bind_col_index = 0;
         for (auto &r : pragma.rows) {
             if (r.size() < 3) continue;
-            string col_name = r[1];
-            string col_type = r[2];
-            d1_bind_data->names.push_back(col_name);
+            string raw_col_name = r[1];
+            string raw_col_type = r[2];
+
+            // Strip quotes to match DuckDB table schema column names
+            string col_name = raw_col_name;
+            if (raw_col_name.size() >= 2 && raw_col_name.front() == '"' && raw_col_name.back() == '"') {
+                col_name = raw_col_name.substr(1, raw_col_name.size() - 2);
+            }
+
+            string col_type = raw_col_type;
+            if (raw_col_type.size() >= 2 && raw_col_type.front() == '"' && raw_col_type.back() == '"') {
+                col_type = raw_col_type.substr(1, raw_col_type.size() - 2);
+            }
+
+            d1_bind_data->names.push_back(col_name);  // Now consistent with table schema
             d1_bind_data->return_types.push_back(D1TypeMapping::MapD1TypeToDuckDB(col_type));
+
+            fprintf(stderr, "🔗 D1TableEntry::GetScanFunction: Added bind column[%zu]: '%s' type: %s\n",
+                   bind_col_index, col_name.c_str(), col_type.c_str());
+            bind_col_index++;
         }
     } else {
         // Fallback: single column
@@ -530,6 +585,10 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
     // Enable projection pushdown for UPDATE/INSERT/DELETE support
     tf.projection_pushdown = true;
     tf.get_row_id_columns = D1GetRowIdColumns;
+
+    // CRITICAL: Enable filter pushdown for WHERE clause optimization
+    tf.filter_pushdown = true;
+    tf.filter_prune = true;
 
     // CRITICAL: Ensure the table function creates proper source operators
     // This should match the configuration of registered D1 table functions
@@ -703,8 +762,10 @@ void D1Catalog::Initialize(optional_ptr<ClientContext> context, bool load_builti
     }
     fprintf(stderr, "D1Catalog::Initialize: Schema lookup successful\n");
 
-    // Skip view creation for now to avoid hanging - just register tables directly
-    fprintf(stderr, "D1Catalog::Initialize: Skipping view creation to avoid hanging\n");
+    // CRITICAL: Skip view creation to avoid schema conflicts with D1TableEntry
+    // Views use SELECT * column order, but D1TableEntry uses PRAGMA table_info order
+    // This causes column index mismatches in filter pushdown
+    fprintf(stderr, "D1Catalog::Initialize: Skipping view creation to avoid schema conflicts\n");
 }
 
 void D1Catalog::CreateD1Views(ClientContext &context) {
