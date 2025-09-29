@@ -5,6 +5,7 @@
 #include "include/d1_custom_data_table.hpp"
 #include "include/d1_physical_insert.hpp"
 #include "include/d1_physical_update.hpp"
+#include "include/d1_physical_delete.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -645,6 +646,33 @@ PhysicalOperator &D1Catalog::PlanUpdate(ClientContext &context, PhysicalPlanGene
     fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Created D1PhysicalUpdate operator successfully!\n");
 
     return d1_update;
+}
+
+PhysicalOperator &D1Catalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
+                                         PhysicalOperator &plan) {
+    fprintf(stderr, "🔥 D1Catalog::PlanDelete: INTERCEPTING DELETE for table: %s\n", op.table.name.c_str());
+
+    // Check if this is a D1 table
+    auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
+    if (!d1_table) {
+        fprintf(stderr, "🔥 D1Catalog::PlanDelete: Not a D1 table, falling back to standard DELETE\n");
+        // Fall back to standard DELETE for non-D1 tables
+        return DuckCatalog::PlanDelete(context, planner, op, plan);
+    }
+
+    fprintf(stderr, "🔥 D1Catalog::PlanDelete: This IS a D1 table - creating D1PhysicalDelete!\n");
+
+    // Create our custom D1PhysicalDelete operator
+    auto &d1_delete = planner.Make<D1PhysicalDelete>(op.types, *d1_table, op.estimated_cardinality);
+
+    // Connect the child operator (the data source)
+    d1_delete.children.push_back(plan);
+
+    fprintf(stderr, "🔥 D1Catalog::PlanDelete: Connected child operator (type: %s, IsSource: %s, IsSink: %s)\n",
+           PhysicalOperatorToString(plan.type).c_str(), plan.IsSource() ? "true" : "false", plan.IsSink() ? "true" : "false");
+    fprintf(stderr, "🔥 D1Catalog::PlanDelete: Created D1PhysicalDelete operator successfully!\n");
+
+    return d1_delete;
 }
 
 void D1Catalog::Initialize(optional_ptr<ClientContext> context, bool load_builtin) {

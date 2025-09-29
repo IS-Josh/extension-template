@@ -583,6 +583,23 @@ void D1DataTable::ExecuteCustomUpdateSQL(const string &update_sql) {
     }
 }
 
+void D1DataTable::ExecuteCustomDeleteSQL(const string &delete_sql) {
+    fprintf(stderr, "D1DataTable: ExecuteCustomDeleteSQL: %s\n", delete_sql.c_str());
+
+    if (!delete_state) {
+        delete_state = make_uniq<D1DeleteState>();
+    }
+
+    // Add the custom SQL directly to the batch
+    delete_state->AddDeleteStatement(delete_sql);
+
+    // Execute immediately if not in batch mode, or if batch is getting large
+    if (!delete_state->batch_mode || delete_state->pending_delete_statements.size() >= 100) {
+        ExecuteBatchOperations(delete_state->pending_delete_statements);
+        delete_state->Clear();
+    }
+}
+
 idx_t D1DataTable::ExecuteDelete(Vector &row_ids, idx_t count) {
     fprintf(stderr, "D1DataTable: ExecuteDelete %zu rows from table '%s'\n", count, table_name.c_str());
 

@@ -160,6 +160,7 @@ public:
     void ExecuteInsert(const DataChunk &chunk);
     void ExecuteUpdate(Vector &row_ids, const vector<PhysicalIndex> &column_ids, const DataChunk &updates);
     void ExecuteCustomUpdateSQL(const string &update_sql);
+    void ExecuteCustomDeleteSQL(const string &delete_sql);
     idx_t ExecuteDelete(Vector &row_ids, idx_t count);
 
     // Batch operations

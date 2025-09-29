@@ -21,6 +21,7 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_update.hpp"
+#include "duckdb/planner/operator/logical_delete.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/catalog/catalog_set.hpp"
@@ -57,6 +58,10 @@ public:
 
     // Override PlanUpdate to use custom D1PhysicalUpdate
     PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
+                                 PhysicalOperator &plan) override;
+
+    // Override PlanDelete to use custom D1PhysicalDelete
+    PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
                                  PhysicalOperator &plan) override;
 
 private:
