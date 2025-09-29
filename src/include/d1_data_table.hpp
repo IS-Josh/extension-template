@@ -123,6 +123,9 @@ struct D1DeleteState {
 };
 
 //! Custom storage implementation for Cloudflare D1 (not inheriting from DataTable)
+// Forward declaration for DataTable wrapper
+class D1DataTableWrapper;
+
 class D1DataTable {
 private:
     CloudflareD1Config config;
@@ -137,8 +140,11 @@ private:
 
     // SQL generation helpers
     string GenerateInsertSQL(const DataChunk &chunk, idx_t row);
+    string GenerateUpsertSQL(const DataChunk &chunk, idx_t row);  // New UPSERT method
     string GenerateUpdateSQL(row_t row_id, const vector<PhysicalIndex> &column_ids,
-                           const DataChunk &updates, idx_t row);
+                             const DataChunk &updates, idx_t row);
+    string GenerateUpdateSQLFromString(const string &row_id_str, const vector<PhysicalIndex> &column_ids,
+                                       const DataChunk &updates, idx_t row);
     string GenerateDeleteSQL(row_t row_id);
     string ConvertValueToSQL(const Value &value);
     string GenerateWhereClauseForRowId(row_t row_id);
@@ -153,6 +159,7 @@ public:
     // D1-specific storage operations (not overriding DataTable)
     void ExecuteInsert(const DataChunk &chunk);
     void ExecuteUpdate(Vector &row_ids, const vector<PhysicalIndex> &column_ids, const DataChunk &updates);
+    void ExecuteCustomUpdateSQL(const string &update_sql);
     idx_t ExecuteDelete(Vector &row_ids, idx_t count);
 
     // Batch operations
@@ -165,5 +172,6 @@ public:
     void FlushPendingOperations();
     void Finalize();
 };
+
 
 } // namespace duckdb

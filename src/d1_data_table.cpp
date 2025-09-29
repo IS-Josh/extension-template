@@ -262,6 +262,63 @@ string D1DataTable::GenerateInsertSQL(const DataChunk &chunk, idx_t row) {
     return sql;
 }
 
+string D1DataTable::GenerateUpsertSQL(const DataChunk &chunk, idx_t row) {
+    // Start with INSERT portion
+    string sql = "INSERT INTO \"" + table_name + "\" (";
+
+    // Add column names
+    for (idx_t col = 0; col < schema.column_names.size() && col < chunk.ColumnCount(); col++) {
+        if (col > 0) sql += ", ";
+        sql += "\"" + schema.column_names[col] + "\"";
+    }
+
+    sql += ") VALUES (";
+
+    // Add values
+    for (idx_t col = 0; col < schema.column_names.size() && col < chunk.ColumnCount(); col++) {
+        if (col > 0) sql += ", ";
+        sql += ConvertValueToSQL(chunk.GetValue(col, row));
+    }
+
+    sql += ")";
+
+    // Add ON CONFLICT clause for primary key columns
+    if (schema.HasPrimaryKey()) {
+        sql += " ON CONFLICT (";
+
+        // Add primary key column names
+        for (size_t i = 0; i < schema.primary_key_columns.size(); i++) {
+            if (i > 0) sql += ", ";
+            sql += "\"" + schema.primary_key_columns[i] + "\"";
+        }
+
+        sql += ") DO UPDATE SET ";
+
+        // Add SET clauses for all non-primary key columns
+        bool first = true;
+        for (idx_t col = 0; col < schema.column_names.size() && col < chunk.ColumnCount(); col++) {
+            const string &col_name = schema.column_names[col];
+
+            // Skip primary key columns in the UPDATE SET clause
+            bool is_pk = false;
+            for (const auto &pk_col : schema.primary_key_columns) {
+                if (col_name == pk_col) {
+                    is_pk = true;
+                    break;
+                }
+            }
+
+            if (!is_pk) {
+                if (!first) sql += ", ";
+                sql += "\"" + col_name + "\" = " + ConvertValueToSQL(chunk.GetValue(col, row));
+                first = false;
+            }
+        }
+    }
+
+    return sql;
+}
+
 string D1DataTable::GenerateWhereClauseForRowId(row_t row_id) {
     string pk_values = D1RowIdManager::GetInstance().MapRowIdToPrimaryKey(row_id, table_name);
     if (pk_values.empty()) {
@@ -287,6 +344,34 @@ string D1DataTable::GenerateUpdateSQL(row_t row_id, const vector<PhysicalIndex> 
 
     // Add WHERE clause based on primary key
     sql += " WHERE " + GenerateWhereClauseForRowId(row_id);
+    return sql;
+}
+
+string D1DataTable::GenerateUpdateSQLFromString(const string &row_id_str, const vector<PhysicalIndex> &column_ids,
+                                                const DataChunk &updates, idx_t row) {
+    string sql = "UPDATE \"" + table_name + "\" SET ";
+
+    // Add SET clauses
+    for (idx_t i = 0; i < column_ids.size(); i++) {
+        if (i > 0) sql += ", ";
+        idx_t col_idx = column_ids[i].index;
+        if (col_idx < schema.column_names.size()) {
+            sql += "\"" + schema.column_names[col_idx] + "\" = " +
+                   ConvertValueToSQL(updates.GetValue(i, row));
+        }
+    }
+
+    // Try to convert string row_id back to numeric row_t
+    try {
+        row_t numeric_row_id = std::stoull(row_id_str);
+        fprintf(stderr, "D1DataTable: Converted string row_id '%s' to numeric %llu\n", row_id_str.c_str(), numeric_row_id);
+        sql += " WHERE " + GenerateWhereClauseForRowId(numeric_row_id);
+    } catch (const std::exception &e) {
+        fprintf(stderr, "D1DataTable: Failed to convert row_id_str '%s' to numeric, treating as literal: %s\n", row_id_str.c_str(), e.what());
+        // If conversion fails, assume the string contains the WHERE condition directly
+        sql += " WHERE " + row_id_str;
+    }
+
     return sql;
 }
 
@@ -366,6 +451,7 @@ void D1DataTable::Finalize() {
     fprintf(stderr, "D1DataTable: Finalize completed\n");
 }
 
+
 //===--------------------------------------------------------------------===//
 // D1DataTable Storage Operations
 //===--------------------------------------------------------------------===//
@@ -380,15 +466,39 @@ void D1DataTable::ExecuteInsert(const DataChunk &chunk) {
         return;
     }
 
-    // Generate INSERT statements for each row
+    // Check if table has primary keys to determine INSERT vs UPSERT strategy
+    bool has_primary_key = schema.HasPrimaryKey();
+    fprintf(stderr, "D1DataTable: Table '%s' has primary key: %s\n",
+           table_name.c_str(), has_primary_key ? "true" : "false");
+
+    if (has_primary_key) {
+        fprintf(stderr, "D1DataTable: Primary key columns: ");
+        for (size_t i = 0; i < schema.primary_key_columns.size(); i++) {
+            if (i > 0) fprintf(stderr, ", ");
+            fprintf(stderr, "%s", schema.primary_key_columns[i].c_str());
+        }
+        fprintf(stderr, "\n");
+    }
+
+    // Generate INSERT/UPSERT statements for each row
     for (idx_t row = 0; row < chunk.size(); row++) {
-        string insert_sql = GenerateInsertSQL(chunk, row);
-        fprintf(stderr, "D1DataTable: Generated INSERT SQL: %s\n", insert_sql.c_str());
+        string insert_sql;
+
+        if (has_primary_key) {
+            // Use UPSERT for tables with primary keys
+            insert_sql = GenerateUpsertSQL(chunk, row);
+            fprintf(stderr, "D1DataTable: Generated UPSERT SQL: %s\n", insert_sql.c_str());
+        } else {
+            // Use regular INSERT for tables without primary keys
+            insert_sql = GenerateInsertSQL(chunk, row);
+            fprintf(stderr, "D1DataTable: Generated INSERT SQL: %s\n", insert_sql.c_str());
+        }
+
         append_state->AddInsertStatement(insert_sql);
 
         // Generate row ID and register primary key mapping
         row_t row_id = D1RowIdManager::GetInstance().GenerateRowId(table_name);
-        if (schema.HasPrimaryKey()) {
+        if (has_primary_key) {
             string pk_where = schema.GetPrimaryKeyWhereClause(chunk, row);
             D1RowIdManager::GetInstance().RegisterRow(table_name, row_id, pk_where);
         }
@@ -419,13 +529,52 @@ void D1DataTable::ExecuteUpdate(Vector &row_ids, const vector<PhysicalIndex> &co
 
     // Flatten the row_ids vector to access the data
     row_ids.Flatten(updates.size());
-    auto row_data = FlatVector::GetData<row_t>(row_ids);
 
-    // Generate UPDATE statements for each row
-    for (idx_t row = 0; row < updates.size(); row++) {
-        string update_sql = GenerateUpdateSQL(row_data[row], column_ids, updates, row);
-        update_state->AddUpdateStatement(update_sql);
+    fprintf(stderr, "D1DataTable: ExecuteUpdate row_ids vector type: %s\n", row_ids.GetType().ToString().c_str());
+
+    // Handle different row identifier types
+    if (row_ids.GetType().id() == LogicalTypeId::VARCHAR) {
+        fprintf(stderr, "D1DataTable: Row IDs are VARCHAR - extracting string data\n");
+        auto string_data = FlatVector::GetData<string_t>(row_ids);
+
+        // For each row, extract the string row identifier
+        for (idx_t row = 0; row < updates.size(); row++) {
+            string row_id_str = string_data[row].GetString();
+            fprintf(stderr, "D1DataTable: Row %llu has string row_id: '%s'\n", row, row_id_str.c_str());
+
+            // Generate UPDATE SQL using string row identifier
+            string update_sql = GenerateUpdateSQLFromString(row_id_str, column_ids, updates, row);
+            update_state->AddUpdateStatement(update_sql);
+        }
+    } else if (row_ids.GetType().id() == LogicalTypeId::BIGINT) {
+        fprintf(stderr, "D1DataTable: Row IDs are BIGINT - extracting numeric data\n");
+        auto row_data = FlatVector::GetData<row_t>(row_ids);
+
+        // Generate UPDATE statements for each row
+        for (idx_t row = 0; row < updates.size(); row++) {
+            string update_sql = GenerateUpdateSQL(row_data[row], column_ids, updates, row);
+            update_state->AddUpdateStatement(update_sql);
+        }
+    } else {
+        throw InternalException("D1DataTable: Unsupported row identifier type: " + row_ids.GetType().ToString());
     }
+
+    // Execute immediately if not in batch mode, or if batch is getting large
+    if (!update_state->batch_mode || update_state->pending_update_statements.size() >= 100) {
+        ExecuteBatchOperations(update_state->pending_update_statements);
+        update_state->Clear();
+    }
+}
+
+void D1DataTable::ExecuteCustomUpdateSQL(const string &update_sql) {
+    fprintf(stderr, "D1DataTable: ExecuteCustomUpdateSQL: %s\n", update_sql.c_str());
+
+    if (!update_state) {
+        update_state = make_uniq<D1UpdateState>();
+    }
+
+    // Add the custom SQL directly to the batch
+    update_state->AddUpdateStatement(update_sql);
 
     // Execute immediately if not in batch mode, or if batch is getting large
     if (!update_state->batch_mode || update_state->pending_update_statements.size() >= 100) {

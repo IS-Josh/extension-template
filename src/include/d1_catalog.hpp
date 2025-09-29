@@ -20,6 +20,7 @@
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/catalog/catalog_set.hpp"
@@ -53,6 +54,10 @@ public:
     // Override PlanInsert to use custom D1PhysicalInsert
     PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                  optional_ptr<PhysicalOperator> plan) override;
+
+    // Override PlanUpdate to use custom D1PhysicalUpdate
+    PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
+                                 PhysicalOperator &plan) override;
 
 private:
     CloudflareD1Config config;

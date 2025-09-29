@@ -4,6 +4,7 @@
 #include "include/d1_storage_data_table.hpp"
 #include "include/d1_custom_data_table.hpp"
 #include "include/d1_physical_insert.hpp"
+#include "include/d1_physical_update.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -528,6 +529,12 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
     // Enable projection pushdown for UPDATE/INSERT/DELETE support
     tf.projection_pushdown = true;
     tf.get_row_id_columns = D1GetRowIdColumns;
+
+    // CRITICAL: Ensure the table function creates proper source operators
+    // This should match the configuration of registered D1 table functions
+    fprintf(stderr, "D1TableEntry::GetScanFunction: Created table function for '%s' with projection_pushdown=%s\n",
+           name.c_str(), tf.projection_pushdown ? "true" : "false");
+
     return tf;
 }
 
@@ -577,6 +584,7 @@ D1DataTable* D1TableEntry::GetD1Storage() {
     return storage.get();
 }
 
+
 //===--------------------------------------------------------------------===//
 // D1Catalog implementation
 //===--------------------------------------------------------------------===//
@@ -610,7 +618,34 @@ PhysicalOperator &D1Catalog::PlanInsert(ClientContext &context, PhysicalPlanGene
     return d1_insert;
 }
 
+PhysicalOperator &D1Catalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
+                                         PhysicalOperator &plan) {
+    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: INTERCEPTING UPDATE for table: %s\n", op.table.name.c_str());
 
+    // Check if this is a D1 table
+    auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
+    if (!d1_table) {
+        fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Not a D1 table, falling back to standard UPDATE\n");
+        // Fall back to standard UPDATE for non-D1 tables
+        return DuckCatalog::PlanUpdate(context, planner, op, plan);
+    }
+
+    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: This IS a D1 table - creating D1PhysicalUpdate!\n");
+
+    // Create our custom D1PhysicalUpdate operator
+    auto &d1_update = planner.Make<D1PhysicalUpdate>(op.types, *d1_table, std::move(op.columns),
+                                                     std::move(op.expressions), std::move(op.bound_defaults),
+                                                     std::move(op.bound_constraints), op.estimated_cardinality);
+
+    // Connect the child operator (the data source)
+    d1_update.children.push_back(plan);
+
+    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Connected child operator (type: %s, IsSource: %s, IsSink: %s)\n",
+           PhysicalOperatorToString(plan.type).c_str(), plan.IsSource() ? "true" : "false", plan.IsSink() ? "true" : "false");
+    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Created D1PhysicalUpdate operator successfully!\n");
+
+    return d1_update;
+}
 
 void D1Catalog::Initialize(optional_ptr<ClientContext> context, bool load_builtin) {
     DuckCatalog::Initialize(load_builtin);
