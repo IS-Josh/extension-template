@@ -1,6 +1,7 @@
 #include "include/d1_catalog.hpp"
 #include "include/d1_client.hpp"
 #include "include/d1_data_table.hpp"
+#include "include/d1_storage_data_table.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -542,17 +543,24 @@ TableStorageInfo D1TableEntry::GetStorageInfo(ClientContext &context) {
 }
 
 DataTable &D1TableEntry::GetStorage() {
-    // Phase B: For now, throw a more informative error message
-    // The challenge is that DataTable methods are not virtual, so we can't easily override them
-    // This would require a more complex approach involving custom storage integration
-    throw NotImplementedException("D1 tables do not support direct storage operations yet.\n"
-                                 "Phase B implementation requires deeper integration with DuckDB's storage layer.\n"
-                                 "Use d1_execute() for INSERT/UPDATE/DELETE operations:\n"
-                                 "  SELECT d1_execute('INSERT INTO users (name) VALUES (''John'')', 'account', 'token', 'db');\n"
-                                 "  SELECT d1_execute('UPDATE users SET name = ''Jane'' WHERE id = 1', 'account', 'token', 'db');\n"
-                                 "  SELECT d1_execute('DELETE FROM users WHERE id = 1', 'account', 'token', 'db');\n"
-                                 "\n"
-                                 "The D1DataTable infrastructure is in place for future implementation.");
+    if (!data_table) {
+        // Phase C: Create DataTable with custom D1TableIOManager
+        fprintf(stderr, "D1TableEntry::GetStorage: Creating DataTable with D1TableIOManager for table '%s'\n", name.c_str());
+
+        // Create custom TableIOManager for D1
+        auto d1_io_manager = make_shared_ptr<D1TableIOManager>(catalog.GetAttached(), schema.name, name, config);
+
+        // Get column definitions from the table catalog entry
+        vector<ColumnDefinition> column_defs;
+        for (auto &col_def : columns.Physical()) {
+            column_defs.push_back(col_def.Copy());
+        }
+
+        // Create DataTable with our custom IO manager
+        data_table = make_shared_ptr<DataTable>(catalog.GetAttached(), d1_io_manager, schema.name, name,
+                                               std::move(column_defs), nullptr);
+    }
+    return *data_table;
 }
 
 // Phase A: Add method to get D1DataTable for internal operations

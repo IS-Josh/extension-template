@@ -24,8 +24,9 @@
 
 namespace duckdb {
 
-// Forward declaration
+// Forward declarations
 class D1DataTable;
+class D1TableIOManager;
 
 class D1Schema;
 class D1TableEntry;
@@ -161,11 +162,17 @@ public:
     // Phase A: Get D1DataTable for internal operations
     D1DataTable* GetD1Storage();
 
+    // Phase D: Get D1 config for helper functions
+    const CloudflareD1Config& GetD1Config() const { return config; }
+
 private:
     CloudflareD1Config config;
 
     // D1DataTable for direct storage operations (Phase A & B)
     mutable unique_ptr<D1DataTable> storage;
+
+    // DataTable with custom D1TableIOManager (Phase C)
+    mutable shared_ptr<DataTable> data_table;
 
     // Original D1/SQLite types for each column
     vector<string> d1_types;

@@ -22,7 +22,11 @@ set(EXTENSION_SOURCES
   src/d1_storage.cpp
   src/d1_catalog.cpp
   src/d1_data_table.cpp
+  src/d1_storage_data_table.cpp
   src/d1_type_mapping.cpp
+  src/d1_query_interceptor.cpp
+  src/d1_secret_helper.cpp
+  src/d1_enhanced_functions.cpp
   src/d1_functions_query.cpp
   src/d1_functions_catalog.cpp
   src/d1_functions_attach.cpp

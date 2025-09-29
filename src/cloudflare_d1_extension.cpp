@@ -18,6 +18,8 @@
 #include "include/d1_analytics.hpp"
 #include "include/d1_pipeline.hpp"
 #include "include/d1_type_mapping.hpp"
+#include "include/d1_query_interceptor.hpp"
+#include "include/d1_enhanced_functions.hpp"
 
 // Forward declarations for Phase 4 & 5 functions
 namespace duckdb {
@@ -534,6 +536,12 @@ static void LoadInternal(ExtensionLoader &loader) {
     auto &db = loader.GetDatabaseInstance();
     auto &config = DBConfig::GetConfig(db);
     config.storage_extensions["d1"] = CreateD1StorageExtension();
+
+    // Register query interceptor for UPDATE/DELETE helper functions
+    D1QueryInterceptor::Register(loader);
+
+    // Register enhanced D1 functions with automatic secret detection
+    D1EnhancedFunctions::Register(loader);
 }
 
 void CloudflareD1Extension::Load(ExtensionLoader &loader) {
