@@ -18,6 +18,8 @@
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/catalog/catalog_set.hpp"
@@ -47,6 +49,10 @@ public:
     // Phase 4: Catalog refresh methods
     void RefreshCatalog(ClientContext &context);
     void RefreshTable(ClientContext &context, const string &table_name);
+
+    // Override PlanInsert to use custom D1PhysicalInsert
+    PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                 optional_ptr<PhysicalOperator> plan) override;
 
 private:
     CloudflareD1Config config;

@@ -310,7 +310,19 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
         output_col_idx = 0;
 
         // Process each requested column based on projection
-        for (auto &col_idx : state.column_indexes) {
+        // If no column_indexes are provided, return all columns
+        if (state.column_indexes.empty()) {
+            // Fallback: return all columns in order
+            for (idx_t col_idx = 0; col_idx < row.size() && col_idx < output.ColumnCount(); col_idx++) {
+                const std::string cell = row[col_idx];
+                auto target_type = output.data[output_col_idx].GetType();
+                Value converted_value = D1TypeMapping::ConvertStringToValue(cell, target_type);
+                output.SetValue(output_col_idx, count, converted_value);
+                output_col_idx++;
+            }
+        } else {
+            // Use projection pushdown
+            for (auto &col_idx : state.column_indexes) {
             if (col_idx.IsRowIdColumn()) {
                 // Generate row ID for UPDATE/DELETE operations
                 // Use the current row index as the row ID
@@ -326,6 +338,7 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
                 output.SetValue(output_col_idx, count, Value(cell));
             }
             output_col_idx++;
+            }
         }
 
         state.row_idx++;

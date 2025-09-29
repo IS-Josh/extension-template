@@ -372,9 +372,9 @@ static unique_ptr<Catalog> D1Attach(optional_ptr<StorageExtensionInfo> storage_i
     // Set path to :memory: to avoid file locking issues (like OpenFileStorageExtension does)
     info.path = ":memory:";
 
-    // Create a DuckCatalog instead of custom D1Catalog
-    auto catalog = make_uniq<DuckCatalog>(db);
-    catalog->Initialize(false);
+    // Create a custom D1Catalog for D1-specific storage
+    auto catalog = make_uniq<D1Catalog>(db, cfg, name);
+    catalog->Initialize(&context, false);
 
     // Set up the default generator for D1 tables
     auto system_transaction = CatalogTransaction::GetSystemTransaction(db.GetDatabase());

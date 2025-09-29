@@ -23,6 +23,8 @@ set(EXTENSION_SOURCES
   src/d1_catalog.cpp
   src/d1_data_table.cpp
   src/d1_storage_data_table.cpp
+  src/d1_custom_data_table.cpp
+  src/d1_physical_insert.cpp
   src/d1_type_mapping.cpp
   src/d1_query_interceptor.cpp
   src/d1_secret_helper.cpp

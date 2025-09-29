@@ -16,11 +16,15 @@ struct CloudflareD1Client::Impl {
 	}
 
     CloudflareD1QueryResult PostJson(const std::string &path, const std::string &body) {
+        fprintf(stderr, "D1Client: [HTTP REQUEST] URL: https://api.cloudflare.com/client/v4%s\n", path.c_str());
+        fprintf(stderr, "D1Client: [HTTP REQUEST] Body: %s\n", body.c_str());
+
 		CloudflareD1QueryResult res;
 		CURL *curl = curl_easy_init();
 		if (!curl) {
 			res.success = false;
 			res.error = "Failed to init CURL";
+			fprintf(stderr, "D1Client: [HTTP ERROR] Failed to init CURL\n");
 			return res;
 		}
         std::string url = "https://api.cloudflare.com/client/v4";
@@ -39,13 +43,23 @@ struct CloudflareD1Client::Impl {
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
 
 		CURLcode rc = curl_easy_perform(curl);
+		fprintf(stderr, "D1Client: [HTTP RESPONSE] CURL result: %s\n", curl_easy_strerror(rc));
+
 		if (rc != CURLE_OK) {
 			res.success = false;
 			res.error = curl_easy_strerror(rc);
+			fprintf(stderr, "D1Client: [HTTP ERROR] Request failed: %s\n", curl_easy_strerror(rc));
 			curl_slist_free_all(headers);
 			curl_easy_cleanup(curl);
 			return res;
 		}
+
+		// Get HTTP response code
+		long response_code;
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+		fprintf(stderr, "D1Client: [HTTP RESPONSE] Status: %ld\n", response_code);
+		fprintf(stderr, "D1Client: [HTTP RESPONSE] Body: %s\n", response_body.c_str());
+
 		curl_slist_free_all(headers);
 		curl_easy_cleanup(curl);
 

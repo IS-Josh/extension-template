@@ -163,6 +163,7 @@ public:
     void RefreshSchema();
     void SetBatchMode(bool enabled);
     void FlushPendingOperations();
+    void Finalize();
 };
 
 } // namespace duckdb

@@ -2,6 +2,8 @@
 #include "include/d1_client.hpp"
 #include "include/d1_data_table.hpp"
 #include "include/d1_storage_data_table.hpp"
+#include "include/d1_custom_data_table.hpp"
+#include "include/d1_physical_insert.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -556,9 +558,12 @@ DataTable &D1TableEntry::GetStorage() {
             column_defs.push_back(col_def.Copy());
         }
 
-        // Create DataTable with our custom IO manager
-        data_table = make_shared_ptr<DataTable>(catalog.GetAttached(), d1_io_manager, schema.name, name,
-                                               std::move(column_defs), nullptr);
+        // Create D1CustomDataTable that routes INSERT operations directly to D1
+        data_table = make_shared_ptr<D1CustomDataTable>(catalog.GetAttached(), d1_io_manager, schema.name, name,
+                                                         std::move(column_defs));
+        fprintf(stderr, "D1TableEntry::GetStorage: Created D1CustomDataTable instance at address: %p\n", data_table.get());
+    } else {
+        fprintf(stderr, "D1TableEntry::GetStorage: Reusing existing DataTable instance at address: %p\n", data_table.get());
     }
     return *data_table;
 }
@@ -577,6 +582,33 @@ D1DataTable* D1TableEntry::GetD1Storage() {
 //===--------------------------------------------------------------------===//
 D1Catalog::D1Catalog(AttachedDatabase &db, CloudflareD1Config cfg, string db_name_p)
     : DuckCatalog(db), config(std::move(cfg)), db_name(std::move(db_name_p)) {}
+
+PhysicalOperator &D1Catalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                         optional_ptr<PhysicalOperator> plan) {
+    fprintf(stderr, "🔥 D1Catalog::PlanInsert: INTERCEPTING INSERT for table: %s\n", op.table.name.c_str());
+
+    // Check if this is a D1 table
+    auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
+    if (!d1_table) {
+        fprintf(stderr, "🔥 D1Catalog::PlanInsert: Not a D1 table, falling back to standard INSERT\n");
+        // Fall back to standard INSERT for non-D1 tables
+        return DuckCatalog::PlanInsert(context, planner, op, plan);
+    }
+
+    fprintf(stderr, "🔥 D1Catalog::PlanInsert: This IS a D1 table - creating D1PhysicalInsert!\n");
+
+    // Create our custom D1PhysicalInsert operator
+    auto &d1_insert = planner.Make<D1PhysicalInsert>(op.types, *d1_table, std::move(op.bound_constraints),
+                                                     op.estimated_cardinality);
+
+    // Connect the child operator (the data source)
+    D_ASSERT(plan);  // INSERT must have a source
+    d1_insert.children.push_back(*plan);
+
+    fprintf(stderr, "🔥 D1Catalog::PlanInsert: Created D1PhysicalInsert operator successfully!\n");
+
+    return d1_insert;
+}
 
 
 

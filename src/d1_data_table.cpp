@@ -301,18 +301,28 @@ string D1DataTable::GenerateDeleteSQL(row_t row_id) {
 
 void D1DataTable::ExecuteBatchOperations(const vector<string> &operations) {
     if (operations.empty()) {
+        fprintf(stderr, "D1DataTable: ExecuteBatchOperations called with empty operations vector\n");
         return;
     }
 
     fprintf(stderr, "D1DataTable: Executing batch of %zu operations\n", operations.size());
+    fprintf(stderr, "D1DataTable: Client config - account_id: '%s', database_id: '%s', api_token length: %zu\n",
+           client->GetConfig().account_id.c_str(),
+           client->GetConfig().database_id.c_str(),
+           client->GetConfig().api_token.length());
 
     for (const auto &sql : operations) {
-        fprintf(stderr, "D1DataTable: Executing: %s\n", sql.c_str());
+        fprintf(stderr, "D1DataTable: [API CALL] Executing: %s\n", sql.c_str());
 
         auto result = client->ObjectQuery(sql, {});
+        fprintf(stderr, "D1DataTable: [API RESPONSE] Success: %s\n", result.success ? "true" : "false");
+
         if (!result.success) {
+            fprintf(stderr, "D1DataTable: [API ERROR] %s\n", result.error.c_str());
             throw InvalidInputException("D1 operation failed: %s\nSQL: %s",
                                        result.error.c_str(), sql.c_str());
+        } else {
+            fprintf(stderr, "D1DataTable: [API SUCCESS] Changes: %lld\n", result.changes);
         }
     }
 
@@ -350,12 +360,21 @@ void D1DataTable::FlushPendingOperations() {
     }
 }
 
+void D1DataTable::Finalize() {
+    fprintf(stderr, "D1DataTable: Finalize called - flushing any pending operations\n");
+    FlushPendingOperations();
+    fprintf(stderr, "D1DataTable: Finalize completed\n");
+}
+
 //===--------------------------------------------------------------------===//
 // D1DataTable Storage Operations
 //===--------------------------------------------------------------------===//
 
 void D1DataTable::ExecuteInsert(const DataChunk &chunk) {
     fprintf(stderr, "D1DataTable: ExecuteInsert %zu rows to table '%s'\n", chunk.size(), table_name.c_str());
+    fprintf(stderr, "D1DataTable: Batch mode: %s, pending statements: %zu\n",
+           append_state->batch_mode ? "true" : "false",
+           append_state->pending_insert_statements.size());
 
     if (chunk.size() == 0) {
         return;
@@ -364,6 +383,7 @@ void D1DataTable::ExecuteInsert(const DataChunk &chunk) {
     // Generate INSERT statements for each row
     for (idx_t row = 0; row < chunk.size(); row++) {
         string insert_sql = GenerateInsertSQL(chunk, row);
+        fprintf(stderr, "D1DataTable: Generated INSERT SQL: %s\n", insert_sql.c_str());
         append_state->AddInsertStatement(insert_sql);
 
         // Generate row ID and register primary key mapping
@@ -374,10 +394,19 @@ void D1DataTable::ExecuteInsert(const DataChunk &chunk) {
         }
     }
 
+    fprintf(stderr, "D1DataTable: After adding statements, pending count: %zu\n",
+           append_state->pending_insert_statements.size());
+
     // Execute immediately if not in batch mode, or if batch is getting large
     if (!append_state->batch_mode || append_state->pending_insert_statements.size() >= 100) {
+        fprintf(stderr, "D1DataTable: Executing batch immediately (batch_mode: %s, count: %zu)\n",
+               append_state->batch_mode ? "true" : "false",
+               append_state->pending_insert_statements.size());
         ExecuteBatchOperations(append_state->pending_insert_statements);
         append_state->Clear();
+    } else {
+        fprintf(stderr, "D1DataTable: Deferring execution (batch mode enabled, count: %zu < 100)\n",
+               append_state->pending_insert_statements.size());
     }
 }
 

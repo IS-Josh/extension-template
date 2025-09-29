@@ -13,6 +13,12 @@ namespace duckdb {
 
 string D1TypeMapping::NormalizeD1Type(const string &d1_type) {
     string normalized = StringUtil::Upper(StringUtil::Replace(d1_type, " ", ""));
+
+    // Remove surrounding double quotes if present
+    if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"') {
+        normalized = normalized.substr(1, normalized.size() - 2);
+    }
+
     return normalized;
 }
 
