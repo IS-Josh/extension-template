@@ -40,6 +40,7 @@ set(EXTENSION_SOURCES
   src/d1_batch_operations.cpp
   src/d1_validation.cpp
   src/d1_predicate_pushdown.cpp
+  src/d1_filter_pushdown.cpp
   src/d1_connection_pool.cpp
   src/d1_metrics.cpp
   src/d1_streaming.cpp

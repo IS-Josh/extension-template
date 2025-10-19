@@ -44,6 +44,7 @@ namespace duckdb {
 #include "include/d1_secret.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "include/d1_catalog.hpp"
+#include "include/d1_raw_bind_data.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
@@ -75,37 +76,7 @@ inline void CloudflareD1OpenSSLVersionScalarFun(DataChunk &args, ExpressionState
 
 // D1 client moved to d1_client.{hpp,cpp}
 
-// --- Table function: d1_query(sql, named_params_json?, account_id, database_id, api_token, api_base_url?)
-struct D1RawBindData : public FunctionData {
-	std::string sql;
-	CloudflareD1Config cfg;
-	std::vector<LogicalType> return_types;
-	std::vector<std::string> names;
-	std::vector<CloudflareD1QueryParam> params;
-	bool use_object = false;
-
-	// Filter pushdown support
-	std::string table_name;  // Store table name for filter pushdown
-	vector<CloudflareD1QueryParam> filter_params;  // Parameters from pushed down filters
-	std::string where_clause;  // Parameterized WHERE clause
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<D1RawBindData>();
-		copy->sql = sql;
-		copy->cfg = cfg;
-		copy->return_types = return_types;
-		copy->names = names;
-		copy->params = params;
-		copy->use_object = use_object;
-		if (!table_name.empty()) {
-			copy->table_name = table_name;
-		}
-		copy->filter_params = filter_params;
-		copy->where_clause = where_clause;
-		return copy;
-	}
-	bool Equals(const FunctionData &other_p) const override { return false; }
-};
+// D1RawBindData is defined in include/d1_raw_bind_data.hpp
 
 unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names) {
 	auto bind = make_uniq<D1RawBindData>();
@@ -144,7 +115,7 @@ unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInpu
 		for (auto &c : res.columns) {
 			bind->names.push_back(c.name.empty() ? string("column") : c.name);
 			// Use comprehensive SQLite type mapping
-                        LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
+			LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
 			bind->return_types.push_back(lt);
 		}
 	} else {
@@ -152,13 +123,17 @@ unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInpu
 		bind->names.push_back("column");
 		bind->return_types.push_back(LogicalType::VARCHAR);
 	}
+    bind->logical_to_physical.resize(bind->names.size());
+    for (idx_t i = 0; i < bind->names.size(); i++) {
+        bind->logical_to_physical[i] = i; // physical order currently matches logical
+    }
     return_types.clear();
     names.clear();
     return_types.reserve(bind->return_types.size());
     names.reserve(bind->names.size());
     for (auto &t : bind->return_types) return_types.push_back(t);
     for (auto &n : bind->names) names.push_back(n);
-	return std::move(bind);
+    return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(bind));
 }
 
 // Bind function for d1_scan - scans a specific table
@@ -203,7 +178,7 @@ unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunctionBindInp
 		for (auto &c : res.columns) {
 			bind->names.push_back(c.name.empty() ? string("column") : c.name);
 			// Use comprehensive SQLite type mapping
-                        LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
+			LogicalType lt = D1TypeMapping::MapD1TypeToDuckDB(c.type);
 			bind->return_types.push_back(lt);
 		}
 	} else {
@@ -211,13 +186,17 @@ unique_ptr<FunctionData> D1ScanBind(ClientContext &context, TableFunctionBindInp
 		bind->names.push_back("column");
 		bind->return_types.push_back(LogicalType::VARCHAR);
 	}
+    bind->logical_to_physical.resize(bind->names.size());
+    for (idx_t i = 0; i < bind->names.size(); i++) {
+        bind->logical_to_physical[i] = i; // physical order currently matches logical
+    }
     return_types.clear();
     names.clear();
     return_types.reserve(bind->return_types.size());
     names.reserve(bind->names.size());
     for (auto &t : bind->return_types) return_types.push_back(t);
     for (auto &n : bind->names) names.push_back(n);
-	return std::move(bind);
+    return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(bind));
 }
 
 struct D1RawGlobalState : public GlobalTableFunctionState {
@@ -233,6 +212,10 @@ struct D1RawGlobalState : public GlobalTableFunctionState {
 	vector<column_t> column_ids;
 	vector<ColumnIndex> column_indexes;
 	bool has_row_id = false;
+
+    // logical->physical column map copied from bind data
+    std::vector<idx_t> logical_to_physical;
+    std::vector<std::string> logical_names; // store bind names for mapping
 
 	// Constructor for D1ScanBindData
     explicit D1RawGlobalState(const CloudflareD1Config &cfg)
@@ -251,242 +234,19 @@ struct D1RawGlobalState : public GlobalTableFunctionState {
 
 
 unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-    fprintf(stderr, "🚀 D1RawInitGlobal: Called from table function\n");
-    fprintf(stderr, "🚀 D1RawInitGlobal: Function name: %s\n",
-           input.bind_data ? "has_bind_data" : "no_bind_data");
     auto &bind = input.bind_data->Cast<D1RawBindData>();
     // Don't execute query during initialization - defer until execution
     auto state = make_uniq<D1RawGlobalState>(bind.cfg);
+    state->logical_to_physical = bind.logical_to_physical;
+    state->logical_names = bind.names;
 
-    // Process filter pushdown if filters are provided
+    // New plan: complex pushdown was handled by callback; just merge WHERE/params
     string final_sql = bind.sql;
-    vector<CloudflareD1QueryParam> final_params(bind.params.begin(), bind.params.end());
-
-    if (input.filters && !input.filters->filters.empty()) {
-        fprintf(stderr, "🔍 D1RawInitGlobal: Processing %zu pushed-down filters\n", input.filters->filters.size());
-
-        // Debug: Show all available column names and their indexes
-        fprintf(stderr, "🔍 D1RawInitGlobal: Available columns (%zu total):\n", bind.names.size());
-        for (size_t i = 0; i < bind.names.size(); i++) {
-            fprintf(stderr, "🔍   Column[%zu]: '%s'\n", i, bind.names[i].c_str());
-        }
-
-        // Build parameterized WHERE clause from filters
-        vector<string> conditions;
-        vector<CloudflareD1QueryParam> filter_params;
-
-        // INTELLIGENT COLUMN MAPPING: Collect all filters and analyze them collectively
-        struct FilterInfo {
-            idx_t original_index;
-            unique_ptr<TableFilter> *filter_ptr;
-            string value_str;
-            LogicalType value_type;
-            bool is_numeric;
-            bool is_null_check;
-        };
-
-        vector<FilterInfo> collected_filters;
-
-        // Step 1: Collect and analyze all filters
-        fprintf(stderr, "🔍 D1RawInitGlobal: Received %zu filters - analyzing collectively:\n", input.filters->filters.size());
-        for (auto &filter_entry : input.filters->filters) {
-            FilterInfo info;
-            info.original_index = filter_entry.first;
-            info.filter_ptr = &filter_entry.second;
-            info.is_null_check = false;
-
-            if (filter_entry.second->filter_type == TableFilterType::CONSTANT_COMPARISON) {
-                auto &comp_filter = filter_entry.second->Cast<ConstantFilter>();
-                info.value_str = comp_filter.constant.ToString();
-                info.value_type = comp_filter.constant.type();
-                info.is_numeric = (info.value_type.id() == LogicalTypeId::INTEGER ||
-                                 info.value_type.id() == LogicalTypeId::BIGINT ||
-                                 info.value_type.id() == LogicalTypeId::DOUBLE ||
-                                 info.value_type.id() == LogicalTypeId::FLOAT);
-            } else if (filter_entry.second->filter_type == TableFilterType::IS_NULL ||
-                      filter_entry.second->filter_type == TableFilterType::IS_NOT_NULL) {
-                info.value_str = "(NULL_CHECK)";
-                info.is_null_check = true;
-                info.is_numeric = false;
-            }
-
-            collected_filters.push_back(info);
-            fprintf(stderr, "🔍   Filter[%llu]: value='%s', type=%s, is_numeric=%s\n",
-                   (unsigned long long)info.original_index, info.value_str.c_str(),
-                   info.value_type.ToString().c_str(), info.is_numeric ? "true" : "false");
-        }
-
-        // Step 2: Create intelligent column mapping based on value types and column types
-        vector<pair<idx_t, string>> column_mappings; // (correct_column_index, column_name)
-
-        for (auto &filter_info : collected_filters) {
-            idx_t best_column_index = filter_info.original_index; // fallback
-            string best_column_name = "unknown";
-
-            if (!filter_info.is_null_check) {
-                // Try to find the best column match based on value and column types
-                float best_score = -1;
-
-                for (idx_t col_idx = 0; col_idx < bind.names.size(); col_idx++) {
-                    string col_name = bind.names[col_idx];
-                    LogicalType col_type = bind.return_types[col_idx];
-
-                    float score = 0;
-
-                    // Score based on type compatibility
-                    bool col_is_numeric = (col_type.id() == LogicalTypeId::INTEGER ||
-                                         col_type.id() == LogicalTypeId::BIGINT ||
-                                         col_type.id() == LogicalTypeId::DOUBLE ||
-                                         col_type.id() == LogicalTypeId::FLOAT);
-
-                    if (filter_info.is_numeric && col_is_numeric) {
-                        score += 2.0; // Strong match: numeric value + numeric column
-                    } else if (!filter_info.is_numeric && !col_is_numeric) {
-                        score += 2.0; // Strong match: string value + text column
-                    } else {
-                        score += 0.5; // Weak match: type mismatch
-                    }
-
-                    // Score based on column name heuristics
-                    if (col_name == "id" && filter_info.is_numeric) {
-                        score += 1.0; // ID columns are usually numeric
-                    } else if (col_name == "name" && !filter_info.is_numeric) {
-                        score += 1.0; // Name columns are usually text
-                    } else if (col_name == "email" && !filter_info.is_numeric &&
-                              filter_info.value_str.find("@") != string::npos) {
-                        score += 1.5; // Email columns with @ in value
-                    }
-
-                    // Avoid duplicate assignments (simple approach)
-                    for (auto &existing : column_mappings) {
-                        if (existing.first == col_idx) {
-                            score -= 3.0; // Heavy penalty for reusing columns
-                        }
-                    }
-
-                    if (score > best_score) {
-                        best_score = score;
-                        best_column_index = col_idx;
-                        best_column_name = col_name;
-                    }
-                }
-
-                fprintf(stderr, "🔧 D1RawInitGlobal: SMART MAPPING: Filter[%llu] value='%s' -> Column[%llu] '%s' (score: %.1f)\n",
-                       (unsigned long long)filter_info.original_index, filter_info.value_str.c_str(),
-                       (unsigned long long)best_column_index, best_column_name.c_str(), best_score);
-            } else {
-                // For null checks, use original index as fallback
-                if (filter_info.original_index < bind.names.size()) {
-                    best_column_index = filter_info.original_index;
-                    best_column_name = bind.names[best_column_index];
-                }
-            }
-
-            column_mappings.push_back({best_column_index, best_column_name});
-        }
-
-        // Step 3: Generate conditions using the intelligent mapping
-        for (size_t i = 0; i < collected_filters.size(); i++) {
-            auto &filter_info = collected_filters[i];
-            auto &mapping = column_mappings[i];
-
-            idx_t column_index = mapping.first;
-            string column_name = mapping.second;
-
-            auto &filter = *filter_info.filter_ptr;
-
-            fprintf(stderr, "🔍 D1RawInitGlobal: Processing filter on column '%s' (index %llu, type %d)\n",
-                   column_name.c_str(), (unsigned long long)column_index, (int)filter->filter_type);
-
-            // Handle different filter types with SECURE parameter generation
-            switch (filter->filter_type) {
-                case TableFilterType::CONSTANT_COMPARISON: {
-                    auto &comp_filter = filter->Cast<ConstantFilter>();
-                    fprintf(stderr, "🔍 D1RawInitGlobal: CONSTANT_COMPARISON filter - comparison_type=%d, value='%s'\n",
-                           (int)comp_filter.comparison_type, comp_filter.constant.ToString().c_str());
-                    string op_str;
-
-                    switch (comp_filter.comparison_type) {
-                        case ExpressionType::COMPARE_EQUAL:
-                            op_str = "=";
-                            break;
-                        case ExpressionType::COMPARE_NOTEQUAL:
-                            op_str = "!=";
-                            break;
-                        case ExpressionType::COMPARE_LESSTHAN:
-                            op_str = "<";
-                            break;
-                        case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-                            op_str = "<=";
-                            break;
-                        case ExpressionType::COMPARE_GREATERTHAN:
-                            op_str = ">";
-                            break;
-                        case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-                            op_str = ">=";
-                            break;
-                       default:
-                           continue; // Skip unsupported operators
-                   }
-
-                   // Generate SECURE parameterized condition
-                   string param_name = "filter_param_" + std::to_string(filter_params.size() + 1);
-                   string param_value = comp_filter.constant.ToString();
-
-                   filter_params.push_back({param_name, param_value});
-
-                   string condition = "\"" + column_name + "\" " + op_str + " ?";
-                   conditions.push_back(condition);
-
-                   fprintf(stderr, "🔍 D1RawInitGlobal: Added SECURE condition: %s (param: %s = '%s')\n",
-                          condition.c_str(), param_name.c_str(), param_value.c_str());
-                   break;
-               }
-               case TableFilterType::IS_NULL:
-                   conditions.push_back("\"" + column_name + "\" IS NULL");
-                   fprintf(stderr, "🔍 D1RawInitGlobal: Added IS NULL condition for '%s'\n", column_name.c_str());
-                   break;
-               case TableFilterType::IS_NOT_NULL:
-                   conditions.push_back("\"" + column_name + "\" IS NOT NULL");
-                   fprintf(stderr, "🔍 D1RawInitGlobal: Added IS NOT NULL condition for '%s'\n", column_name.c_str());
-                   break;
-               default:
-                   // Skip unsupported filter types
-                   fprintf(stderr, "🔍 D1RawInitGlobal: Skipping unsupported filter type for '%s'\n", column_name.c_str());
-                   continue;
-           }
-        }
-
-        // Combine all conditions with AND and rebuild SQL
-        if (!conditions.empty()) {
-            string where_clause = StringUtil::Join(conditions, " AND ");
-
-            // Rebuild SQL query with parameterized WHERE clause
-            string base_sql = "SELECT * FROM \"" + bind.table_name + "\"";
-            if (!where_clause.empty()) {
-                base_sql += " WHERE " + where_clause;
-            }
-            final_sql = base_sql;
-
-            // Merge filter parameters with existing parameters
-            final_params.insert(final_params.end(), filter_params.begin(), filter_params.end());
-
-            fprintf(stderr, "🔍 D1RawInitGlobal: Generated SECURE parameterized SQL: %s\n", final_sql.c_str());
-            fprintf(stderr, "🔍 D1RawInitGlobal: With %zu parameters (SQL injection safe!)\n", final_params.size());
-
-            // Log all parameters safely
-            for (const auto &param : filter_params) {
-                fprintf(stderr, "🔍 D1RawInitGlobal: Parameter %s = '%s'\n", param.name.c_str(), param.value.c_str());
-            }
-        } else {
-            fprintf(stderr, "🔍 D1RawInitGlobal: No conditions generated - no pushdown applied\n");
-        }
-    } else {
-        fprintf(stderr, "🔍 D1RawInitGlobal: No filters to push down\n");
+    if (!bind.where_clause.empty()) {
+        final_sql += " WHERE " + bind.where_clause;
     }
-
     state->sql = final_sql;
-    state->params = final_params;
+    state->params = bind.filter_params;
     state->use_object = bind.use_object;
     state->query_executed = false;
 
@@ -502,6 +262,9 @@ unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, Tab
             break;
         }
     }
+
+    // Transfer mapping
+    state->logical_to_physical = bind.logical_to_physical;
 
     fprintf(stderr, "D1RawInitGlobal: Projection - %zu columns, has_row_id: %s\n",
             input.column_ids.size(), state->has_row_id ? "true" : "false");
@@ -536,7 +299,31 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
             } else {
                 fprintf(stderr, "D1RawFunc: D1 query returned %zu rows, %zu columns\n", state.res.rows.size(), state.res.columns.size());
             }
+
+            // Rebuild logical->physical mapping based on returned column meta
+            if (!state.logical_names.empty() && !state.res.columns.empty()) {
+                state.logical_to_physical.assign(state.logical_names.size(), DConstants::INVALID_INDEX);
+                for (idx_t phys = 0; phys < state.res.columns.size(); phys++) {
+                    const auto &col_meta = state.res.columns[phys];
+                    const string &col_name = col_meta.name;
+                    for (idx_t logical = 0; logical < state.logical_names.size(); logical++) {
+                        if (StringUtil::CIEquals(col_name, state.logical_names[logical])) {
+                            state.logical_to_physical[logical] = phys;
+                            break;
+                        }
+                    }
+                }
+                for (idx_t i = 0; i < state.logical_to_physical.size(); i++) {
+                    if (state.logical_to_physical[i] == DConstants::INVALID_INDEX) {
+                        state.logical_to_physical[i] = i;
+                    }
+                }
+            }
         }
+
+        // CRITICAL FIX: Reset row_idx when executing a new query
+        // This ensures multiple table scans (e.g., for joins) work correctly
+        state.row_idx = 0;
         state.query_executed = true;
     }
 
@@ -548,6 +335,13 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
     idx_t output_col_idx = 0;
     idx_t count = 0;
 
+    // CRITICAL: Check if we've already returned all rows
+    if (state.row_idx >= state.res.rows.size()) {
+        // All rows have been returned, set cardinality to 0
+        output.SetCardinality(0);
+        return;
+    }
+
     while (count < STANDARD_VECTOR_SIZE && state.row_idx < state.res.rows.size()) {
         auto &row = state.res.rows[state.row_idx];
         output_col_idx = 0;
@@ -556,12 +350,17 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
         // If no column_indexes are provided, return all columns
         if (state.column_indexes.empty()) {
             // Fallback: return all columns in order
-            for (idx_t col_idx = 0; col_idx < row.size() && col_idx < output.ColumnCount(); col_idx++) {
-                const std::string cell = row[col_idx];
-                auto target_type = output.data[output_col_idx].GetType();
-                Value converted_value = D1TypeMapping::ConvertStringToValue(cell, target_type);
-                output.SetValue(output_col_idx, count, converted_value);
-                output_col_idx++;
+            for (idx_t logical = 0; logical < output.ColumnCount(); logical++) {
+                idx_t phys = state.logical_to_physical[logical];
+                string cell = phys < row.size() ? row[phys] : string();
+                auto target_type = output.data[logical].GetType();
+                if (target_type.id() == LogicalTypeId::VARCHAR) {
+                    if (cell.size() >= 2 && cell.front() == '"' && cell.back() == '"') {
+                        cell = cell.substr(1, cell.size() - 2);
+                    }
+                }
+                Value v = D1TypeMapping::ConvertStringToValue(cell, target_type);
+                output.SetValue(logical, count, v);
             }
         } else {
             // Use projection pushdown
@@ -573,12 +372,17 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
                 fprintf(stderr, "D1RawFunc: Generated row ID %llu for row %llu\n", (unsigned long long)state.row_idx, (unsigned long long)count);
             } else {
                 // Regular column - get from D1 result
-                auto primary_col_idx = col_idx.GetPrimaryIndex();
-                const std::string cell = primary_col_idx < row.size() ? row[primary_col_idx] : std::string();
-
-                // Convert string to appropriate value based on column type
+                idx_t logical = col_idx.GetPrimaryIndex();
+                idx_t phys = state.logical_to_physical[logical];
+                string cell = phys < row.size() ? row[phys] : string();
                 auto target_type = output.data[output_col_idx].GetType();
-                output.SetValue(output_col_idx, count, Value(cell));
+                if (target_type.id() == LogicalTypeId::VARCHAR) {
+                    if (cell.size() >= 2 && cell.front() == '"' && cell.back() == '"') {
+                        cell = cell.substr(1, cell.size() - 2);
+                    }
+                }
+                Value v = D1TypeMapping::ConvertStringToValue(cell, target_type);
+                output.SetValue(output_col_idx, count, v);
             }
             output_col_idx++;
             }
@@ -590,6 +394,16 @@ void D1RawFunc(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 
     output.SetCardinality(count);
     fprintf(stderr, "D1RawFunc: Returned %llu rows with %llu columns (projection pushdown)\n", (unsigned long long)count, (unsigned long long)output_col_idx);
+
+    // DEBUG: Log the actual data being returned to DuckDB
+    if (count > 0) {
+        fprintf(stderr, "D1RawFunc: DEBUG - First row data:\n");
+        for (idx_t col = 0; col < output.ColumnCount(); col++) {
+            auto val = output.GetValue(col, 0);
+            fprintf(stderr, "D1RawFunc:   Column[%llu] = '%s' (type: %s)\n",
+                   (unsigned long long)col, val.ToString().c_str(), val.type().ToString().c_str());
+        }
+    }
 }
 
 // --- Catalog functions
@@ -780,7 +594,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterD1AttachFunctions(loader);
 	RegisterD1BulkFunctions(loader);
 	RegisterD1SecretFunctions(loader);
-	RegisterD1BatchOperations(loader);
 	RegisterD1PredicatePushdown(loader);
 	RegisterD1ConnectionPool(loader);
 	RegisterD1Metrics(loader);

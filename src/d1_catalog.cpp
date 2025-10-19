@@ -36,6 +36,8 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include <set>
+#include "d1_raw_bind_data.hpp"
+#include "include/d1_filter_pushdown.hpp"
 
 namespace duckdb {
 
@@ -45,41 +47,7 @@ extern unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionB
 extern unique_ptr<GlobalTableFunctionState> D1RawInitGlobal(ClientContext &context, TableFunctionInitInput &input);
 extern vector<column_t> D1GetRowIdColumns(ClientContext &context, optional_ptr<FunctionData> bind_data);
 
-// D1RawBindData structure
-struct D1RawBindData : public FunctionData {
-    string sql;
-    CloudflareD1Config cfg;
-    vector<LogicalType> return_types;
-    vector<string> names;
-    vector<CloudflareD1QueryParam> params;
-    bool use_object = false;
-
-    // Filter pushdown support
-    string table_name;  // Store table name for filter pushdown
-    vector<CloudflareD1QueryParam> filter_params;  // Parameters from pushed down filters
-    string where_clause;  // Parameterized WHERE clause
-
-    unique_ptr<FunctionData> Copy() const override {
-        auto result = make_uniq<D1RawBindData>();
-        result->sql = sql;
-        result->cfg = cfg;
-        result->return_types = return_types;
-        result->names = names;
-        result->params = params;
-        result->use_object = use_object;
-        result->table_name = table_name;
-        result->filter_params = filter_params;
-        result->where_clause = where_clause;
-        return std::move(result);
-    }
-
-    bool Equals(const FunctionData &other_p) const override {
-        auto &other = other_p.Cast<D1RawBindData>();
-        return sql == other.sql && cfg.account_id == other.cfg.account_id &&
-               cfg.api_token == other.cfg.api_token && cfg.database_id == other.cfg.database_id;
-    }
-};
-
+// D1RawBindData moved to shared header
 
 //===--------------------------------------------------------------------===//
 //===--------------------------------------------------------------------===//
@@ -90,22 +58,17 @@ D1CatalogSet::D1CatalogSet(Catalog &catalog, CloudflareD1Config cfg)
 }
 
 void D1CatalogSet::TryLoadEntries(ClientContext &context) {
-    fprintf(stderr, "D1CatalogSet::TryLoadEntries: Loading entries\n");
     if (EntriesLoaded()) {
-        fprintf(stderr, "D1CatalogSet::TryLoadEntries: Already loaded\n");
         return;
     }
 
     std::lock_guard<std::mutex> l(load_lock);
     if (EntriesLoaded()) {
-        fprintf(stderr, "D1CatalogSet::TryLoadEntries: Already loaded (after lock)\n");
         return;
     }
 
-    fprintf(stderr, "D1CatalogSet::TryLoadEntries: Calling LoadEntries\n");
     LoadEntries(context);
     entries_loaded = true;
-    fprintf(stderr, "D1CatalogSet::TryLoadEntries: Done loading, entries_loaded=%s\n", entries_loaded ? "true" : "false");
 }
 
 void D1CatalogSet::ClearEntries() {
@@ -126,12 +89,10 @@ D1TableSet::D1TableSet(Catalog &catalog, CloudflareD1Config cfg)
 }
 
 void D1TableSet::LoadEntries(ClientContext &context) {
-    fprintf(stderr, "D1TableSet::LoadEntries: Discovering tables lazily\n");
 
     // For testing, create mock data if credentials are "test"
     CloudflareD1QueryResult res;
     if (config.account_id == "test" && config.api_token == "test" && config.database_id == "test") {
-        fprintf(stderr, "D1TableSet::LoadEntries: Using mock data for testing\n");
         res.success = true;
         res.rows = {{"users", "table"}, {"products", "table"}, {"orders", "table"}};
     } else {
@@ -140,17 +101,14 @@ void D1TableSet::LoadEntries(ClientContext &context) {
     }
 
     if (!res.success) {
-        fprintf(stderr, "D1TableSet::LoadEntries: Failed to query sqlite_master: %s\n", res.error.c_str());
         return;
     }
-    fprintf(stderr, "D1TableSet::LoadEntries: Found %zu tables/views in sqlite_master\n", res.rows.size());
     auto txn = CatalogTransaction::GetSystemCatalogTransaction(context);
     // We need to find the D1Schema that contains this D1TableSet
     // The schema should be the one with name "main" since that's what D1Catalog::Initialize creates
     auto &catalog = GetCatalog();
     auto schema_opt = catalog.GetSchema(context, "main", OnEntryNotFound::RETURN_NULL);
     if (!schema_opt) {
-        fprintf(stderr, "D1TableSet::LoadEntries: D1Schema not found\n");
         return;
     }
     auto &schema_entry = dynamic_cast<D1Schema&>(*schema_opt);
@@ -159,7 +117,6 @@ void D1TableSet::LoadEntries(ClientContext &context) {
         if (row.size() < 2) continue;
         string name = row[0];
         string type = row[1];
-        fprintf(stderr, "D1TableSet::LoadEntries: Processing row: name='%s', type='%s'\n", name.c_str(), type.c_str());
         if (name == "_cf_KV" || name == "\"_cf_KV\"") continue;
         if (type.size() >= 2 && type.front() == '"' && type.back() == '"') {
             type = type.substr(1, type.size() - 2);
@@ -170,21 +127,16 @@ void D1TableSet::LoadEntries(ClientContext &context) {
         }
         if (type != "table") continue; // tables only in this stage
         if (GetEntry(context, name)) {
-            fprintf(stderr, "D1TableSet::LoadEntries: Table '%s' already registered, skipping\n", name.c_str());
             continue; // already registered
         }
         try {
             auto entry = make_uniq<D1TableEntry>(GetCatalog(), schema_entry, name, config);
             LogicalDependencyList deps;
             bool success = CreateEntry(txn, name, std::move(entry), deps);
-            fprintf(stderr, "D1TableSet::LoadEntries: Registered table '%s' (success=%d)\n", name.c_str(), success);
             table_count++;
         } catch (std::exception &e) {
-            fprintf(stderr, "D1TableSet::LoadEntries: Failed to register '%s': %s\n", name.c_str(), e.what());
         }
     }
-    fprintf(stderr, "D1TableSet::LoadEntries: Registered %d tables total\n", table_count);
-    fprintf(stderr, "D1TableSet::LoadEntries: LoadEntries completed\n");
 }
 
 //===--------------------------------------------------------------------===//
@@ -213,12 +165,9 @@ void D1Schema::LoadEntries(ClientContext &context) {
 
 // Implement required pure virtual methods
 void D1Schema::Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
-    fprintf(stderr, "D1Schema::Scan: CALLED for type %d in schema '%s'\n", (int)type, name.c_str());
     // Ensure D1 tables are loaded before scanning so meta queries (e.g. duckdb_tables) see them
     if (type == CatalogType::TABLE_ENTRY || type == CatalogType::VIEW_ENTRY) {
-        fprintf(stderr, "D1Schema::Scan: Loading tables\n");
         tables.TryLoadEntries(context);
-        fprintf(stderr, "D1Schema::Scan: Tables loaded, now scanning\n");
     }
     auto &set = GetCatalogSet(type);
     fprintf(stderr, "D1Schema::Scan: About to scan catalog set, type=%d\n", (int)type);
@@ -448,16 +397,6 @@ unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, Schem
         string sql = "PRAGMA table_info(\"" + table_name + "\")";
         auto res = client.RawQuery(sql, {});
 
-        fprintf(stderr, "🏗️ D1TableEntry::MakeCreateInfo: PRAGMA table_info returned %zu rows\n", res.rows.size());
-        for (size_t i = 0; i < res.rows.size(); i++) {
-            const auto &row = res.rows[i];
-            fprintf(stderr, "🏗️ PRAGMA row[%zu]: [", i);
-            for (size_t j = 0; j < row.size(); j++) {
-                if (j > 0) fprintf(stderr, ", ");
-                fprintf(stderr, "'%s'", row[j].c_str());
-            }
-            fprintf(stderr, "]\n");
-        }
 
         if (res.success && !res.rows.empty()) {
             size_t col_index = 0;
@@ -480,8 +419,6 @@ unique_ptr<CreateTableInfo> D1TableEntry::MakeCreateInfo(Catalog &catalog, Schem
                     LogicalType duckdb_type = D1TypeMapping::MapD1TypeToDuckDB(col_type);
                     create_info->columns.AddColumn(ColumnDefinition(col_name, duckdb_type));
 
-                    fprintf(stderr, "🏗️ D1TableEntry::MakeCreateInfo: Added catalog column[%zu]: '%s' type: %s\n",
-                           col_index, col_name.c_str(), col_type.c_str());
                     col_index++;
                 }
             }
@@ -498,7 +435,6 @@ D1TableEntry::D1TableEntry(Catalog &catalog, SchemaCatalogEntry &schema, const s
                            CloudflareD1Config cfg)
     : TableCatalogEntry(catalog, schema, *MakeCreateInfo(catalog, schema, table_name, cfg)), config(std::move(cfg)) {
     name = table_name;
-    fprintf(stderr, "D1TableEntry: Created table entry for '%s'\n", table_name.c_str());
 }
 
 void D1TableEntry::GetColumnInfo(ClientContext &context) {
@@ -508,11 +444,9 @@ void D1TableEntry::GetColumnInfo(ClientContext &context) {
     auto res = client.RawQuery(sql, {});
 
     if (!res.success) {
-        fprintf(stderr, "D1TableEntry::GetColumnInfo: Failed to query table info: %s\n", res.error.c_str());
         return;
     }
 
-    fprintf(stderr, "D1TableEntry::GetColumnInfo: Found %zu columns for table '%s'\n", res.rows.size(), name.c_str());
 
     // Store the original D1/SQLite types
     d1_types.clear();
@@ -536,16 +470,6 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
     CloudflareD1Client client(config);
     auto pragma = client.RawQuery("PRAGMA table_info(\"" + name + "\")", {});
 
-    fprintf(stderr, "🔗 D1TableEntry::GetScanFunction: PRAGMA table_info returned %zu rows\n", pragma.rows.size());
-    for (size_t i = 0; i < pragma.rows.size(); i++) {
-        const auto &row = pragma.rows[i];
-        fprintf(stderr, "🔗 PRAGMA row[%zu]: [", i);
-        for (size_t j = 0; j < row.size(); j++) {
-            if (j > 0) fprintf(stderr, ", ");
-            fprintf(stderr, "'%s'", row[j].c_str());
-        }
-        fprintf(stderr, "]\n");
-    }
 
     if (pragma.success && !pragma.rows.empty()) {
         size_t bind_col_index = 0;
@@ -568,14 +492,17 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
             d1_bind_data->names.push_back(col_name);  // Now consistent with table schema
             d1_bind_data->return_types.push_back(D1TypeMapping::MapD1TypeToDuckDB(col_type));
 
-            fprintf(stderr, "🔗 D1TableEntry::GetScanFunction: Added bind column[%zu]: '%s' type: %s\n",
-                   bind_col_index, col_name.c_str(), col_type.c_str());
             bind_col_index++;
         }
     } else {
         // Fallback: single column
         d1_bind_data->names.push_back("value");
         d1_bind_data->return_types.push_back(LogicalType::VARCHAR);
+    }
+
+    d1_bind_data->logical_to_physical.resize(d1_bind_data->names.size());
+    for (idx_t i = 0; i < d1_bind_data->names.size(); i++) {
+        d1_bind_data->logical_to_physical[i] = i;
     }
 
     bind_data = std::move(d1_bind_data);
@@ -586,14 +513,13 @@ TableFunction D1TableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
     tf.projection_pushdown = true;
     tf.get_row_id_columns = D1GetRowIdColumns;
 
-    // CRITICAL: Enable filter pushdown for WHERE clause optimization
-    tf.filter_pushdown = true;
-    tf.filter_prune = true;
+    // Register complex filter pushdown callback (only safe predicates forwarded)
+    tf.pushdown_complex_filter = duckdb::D1PushdownComplexFilter;
+    tf.filter_pushdown = false;   // rely on complex callback instead of TableFilterSet
+    tf.filter_prune = false;
 
     // CRITICAL: Ensure the table function creates proper source operators
     // This should match the configuration of registered D1 table functions
-    fprintf(stderr, "D1TableEntry::GetScanFunction: Created table function for '%s' with projection_pushdown=%s\n",
-           name.c_str(), tf.projection_pushdown ? "true" : "false");
 
     return tf;
 }
@@ -614,7 +540,6 @@ TableStorageInfo D1TableEntry::GetStorageInfo(ClientContext &context) {
 DataTable &D1TableEntry::GetStorage() {
     if (!data_table) {
         // Phase C: Create DataTable with custom D1TableIOManager
-        fprintf(stderr, "D1TableEntry::GetStorage: Creating DataTable with D1TableIOManager for table '%s'\n", name.c_str());
 
         // Create custom TableIOManager for D1
         auto d1_io_manager = make_shared_ptr<D1TableIOManager>(catalog.GetAttached(), schema.name, name, config);
@@ -628,9 +553,7 @@ DataTable &D1TableEntry::GetStorage() {
         // Create D1CustomDataTable that routes INSERT operations directly to D1
         data_table = make_shared_ptr<D1CustomDataTable>(catalog.GetAttached(), d1_io_manager, schema.name, name,
                                                          std::move(column_defs));
-        fprintf(stderr, "D1TableEntry::GetStorage: Created D1CustomDataTable instance at address: %p\n", data_table.get());
     } else {
-        fprintf(stderr, "D1TableEntry::GetStorage: Reusing existing DataTable instance at address: %p\n", data_table.get());
     }
     return *data_table;
 }
@@ -638,7 +561,6 @@ DataTable &D1TableEntry::GetStorage() {
 // Phase A: Add method to get D1DataTable for internal operations
 D1DataTable* D1TableEntry::GetD1Storage() {
     if (!storage) {
-        fprintf(stderr, "D1TableEntry::GetD1Storage: Creating D1DataTable for table '%s'\n", name.c_str());
         storage = make_uniq<D1DataTable>(schema.name, name, config);
     }
     return storage.get();
@@ -653,17 +575,14 @@ D1Catalog::D1Catalog(AttachedDatabase &db, CloudflareD1Config cfg, string db_nam
 
 PhysicalOperator &D1Catalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                          optional_ptr<PhysicalOperator> plan) {
-    fprintf(stderr, "🔥 D1Catalog::PlanInsert: INTERCEPTING INSERT for table: %s\n", op.table.name.c_str());
 
     // Check if this is a D1 table
     auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
     if (!d1_table) {
-        fprintf(stderr, "🔥 D1Catalog::PlanInsert: Not a D1 table, falling back to standard INSERT\n");
         // Fall back to standard INSERT for non-D1 tables
         return DuckCatalog::PlanInsert(context, planner, op, plan);
     }
 
-    fprintf(stderr, "🔥 D1Catalog::PlanInsert: This IS a D1 table - creating D1PhysicalInsert!\n");
 
     // Create our custom D1PhysicalInsert operator
     auto &d1_insert = planner.Make<D1PhysicalInsert>(op.types, *d1_table, std::move(op.bound_constraints),
@@ -673,24 +592,20 @@ PhysicalOperator &D1Catalog::PlanInsert(ClientContext &context, PhysicalPlanGene
     D_ASSERT(plan);  // INSERT must have a source
     d1_insert.children.push_back(*plan);
 
-    fprintf(stderr, "🔥 D1Catalog::PlanInsert: Created D1PhysicalInsert operator successfully!\n");
 
     return d1_insert;
 }
 
 PhysicalOperator &D1Catalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
                                          PhysicalOperator &plan) {
-    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: INTERCEPTING UPDATE for table: %s\n", op.table.name.c_str());
 
     // Check if this is a D1 table
     auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
     if (!d1_table) {
-        fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Not a D1 table, falling back to standard UPDATE\n");
         // Fall back to standard UPDATE for non-D1 tables
         return DuckCatalog::PlanUpdate(context, planner, op, plan);
     }
 
-    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: This IS a D1 table - creating D1PhysicalUpdate!\n");
 
     // Create our custom D1PhysicalUpdate operator
     auto &d1_update = planner.Make<D1PhysicalUpdate>(op.types, *d1_table, std::move(op.columns),
@@ -700,26 +615,20 @@ PhysicalOperator &D1Catalog::PlanUpdate(ClientContext &context, PhysicalPlanGene
     // Connect the child operator (the data source)
     d1_update.children.push_back(plan);
 
-    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Connected child operator (type: %s, IsSource: %s, IsSink: %s)\n",
-           PhysicalOperatorToString(plan.type).c_str(), plan.IsSource() ? "true" : "false", plan.IsSink() ? "true" : "false");
-    fprintf(stderr, "🔥 D1Catalog::PlanUpdate: Created D1PhysicalUpdate operator successfully!\n");
 
     return d1_update;
 }
 
 PhysicalOperator &D1Catalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
                                          PhysicalOperator &plan) {
-    fprintf(stderr, "🔥 D1Catalog::PlanDelete: INTERCEPTING DELETE for table: %s\n", op.table.name.c_str());
 
     // Check if this is a D1 table
     auto d1_table = dynamic_cast<D1TableEntry*>(&op.table);
     if (!d1_table) {
-        fprintf(stderr, "🔥 D1Catalog::PlanDelete: Not a D1 table, falling back to standard DELETE\n");
         // Fall back to standard DELETE for non-D1 tables
         return DuckCatalog::PlanDelete(context, planner, op, plan);
     }
 
-    fprintf(stderr, "🔥 D1Catalog::PlanDelete: This IS a D1 table - creating D1PhysicalDelete!\n");
 
     // Create our custom D1PhysicalDelete operator
     auto &d1_delete = planner.Make<D1PhysicalDelete>(op.types, *d1_table, op.estimated_cardinality);
@@ -727,9 +636,6 @@ PhysicalOperator &D1Catalog::PlanDelete(ClientContext &context, PhysicalPlanGene
     // Connect the child operator (the data source)
     d1_delete.children.push_back(plan);
 
-    fprintf(stderr, "🔥 D1Catalog::PlanDelete: Connected child operator (type: %s, IsSource: %s, IsSink: %s)\n",
-           PhysicalOperatorToString(plan.type).c_str(), plan.IsSource() ? "true" : "false", plan.IsSink() ? "true" : "false");
-    fprintf(stderr, "🔥 D1Catalog::PlanDelete: Created D1PhysicalDelete operator successfully!\n");
 
     return d1_delete;
 }
@@ -757,24 +663,19 @@ void D1Catalog::Initialize(optional_ptr<ClientContext> context, bool load_builti
     }
     auto schema_entry = schema_set.GetEntry(txn, sinfo.schema);
     if (!schema_entry) {
-        fprintf(stderr, "D1Catalog::Initialize: Failed to create or find D1Schema\n");
         return;
     }
-    fprintf(stderr, "D1Catalog::Initialize: Schema lookup successful\n");
 
     // CRITICAL: Skip view creation to avoid schema conflicts with D1TableEntry
     // Views use SELECT * column order, but D1TableEntry uses PRAGMA table_info order
     // This causes column index mismatches in filter pushdown
-    fprintf(stderr, "D1Catalog::Initialize: Skipping view creation to avoid schema conflicts\n");
 }
 
 void D1Catalog::CreateD1Views(ClientContext &context) {
-    fprintf(stderr, "D1Catalog::CreateD1Views: Creating views for D1 tables\n");
 
     // For testing, create mock data if credentials are "test"
     CloudflareD1QueryResult res;
     if (config.account_id == "test" && config.api_token == "test" && config.database_id == "test") {
-        fprintf(stderr, "D1Catalog::CreateD1Views: Using mock data for testing\n");
         res.success = true;
         res.rows = {{"users"}, {"products"}, {"orders"}};
     } else {
@@ -784,11 +685,9 @@ void D1Catalog::CreateD1Views(ClientContext &context) {
     }
 
     if (!res.success) {
-        fprintf(stderr, "D1Catalog::CreateD1Views: Failed to query sqlite_master: %s\n", res.error.c_str());
         return;
     }
 
-    fprintf(stderr, "D1Catalog::CreateD1Views: Found %zu tables\n", res.rows.size());
 
     // Get the transaction from the context
     auto txn = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -802,7 +701,6 @@ void D1Catalog::CreateD1Views(ClientContext &context) {
         if (table_name.size() >= 2 && table_name.front() == '"' && table_name.back() == '"') {
             table_name = table_name.substr(1, table_name.size() - 2);
         }
-        fprintf(stderr, "D1Catalog::CreateD1Views: Creating view for table '%s'\n", table_name.c_str());
 
         // Create view using d1_scan - should work now with lazy execution
         try {
@@ -812,15 +710,11 @@ void D1Catalog::CreateD1Views(ClientContext &context) {
                              "'" + config.database_id + "', " +
                              "'" + table_name + "')";
 
-            fprintf(stderr, "D1Catalog::CreateD1Views: About to execute view SQL: %s\n", view_sql.c_str());
             auto result = context.Query(view_sql, true);
-            fprintf(stderr, "D1Catalog::CreateD1Views: Created view '%s'\n", table_name.c_str());
         } catch (std::exception &e) {
-            fprintf(stderr, "D1Catalog::CreateD1Views: Failed to create view '%s': %s\n", table_name.c_str(), e.what());
         }
     }
 
-    fprintf(stderr, "D1Catalog::CreateD1Views: Finished creating views\n");
 }
 
 //===--------------------------------------------------------------------===//

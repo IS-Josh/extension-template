@@ -1,6 +1,8 @@
 #include "include/d1_functions.hpp"
 #include "include/d1_client.hpp"
 #include "include/d1_catalog.hpp"
+#include "include/d1_raw_bind_data.hpp"
+#include "include/d1_filter_pushdown.hpp"
 #include "include/d1_type_mapping.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/database_manager.hpp"
@@ -8,39 +10,6 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
-
-// Forward declarations from cloudflare_d1_extension.cpp
-struct D1RawBindData : public FunctionData {
-    string sql;
-    CloudflareD1Config cfg;
-    vector<LogicalType> return_types;
-    vector<string> names;
-    vector<CloudflareD1QueryParam> params;
-    bool use_object = false;
-
-    // Projection pushdown support
-    vector<column_t> projected_columns;
-    bool has_row_id = false;
-
-    unique_ptr<FunctionData> Copy() const override {
-        auto result = make_uniq<D1RawBindData>();
-        result->sql = sql;
-        result->cfg = cfg;
-        result->return_types = return_types;
-        result->names = names;
-        result->params = params;
-        result->use_object = use_object;
-        result->projected_columns = projected_columns;
-        result->has_row_id = has_row_id;
-        return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(result));
-    }
-
-    bool Equals(const FunctionData &other_p) const override {
-        auto &other = other_p.Cast<D1RawBindData>();
-        return sql == other.sql && cfg.account_id == other.cfg.account_id &&
-               cfg.api_token == other.cfg.api_token && cfg.database_id == other.cfg.database_id;
-    }
-};
 
 // Forward decls from cloudflare_d1_extension.cpp
 extern unique_ptr<FunctionData> D1RawBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names);
@@ -199,6 +168,11 @@ unique_ptr<FunctionData> D1ScanSecretBind(ClientContext &context, TableFunctionB
 		}
 	}
 
+    bind->logical_to_physical.resize(bind->names.size());
+    for (idx_t i = 0; i < bind->names.size(); i++) {
+        bind->logical_to_physical[i] = i;
+    }
+
 	return unique_ptr_cast<D1RawBindData, FunctionData>(std::move(bind));
 }
 
@@ -211,9 +185,15 @@ vector<column_t> D1GetRowIdColumns(ClientContext &context, optional_ptr<Function
 }
 
 void RegisterD1QueryFunctions(ExtensionLoader &loader) {
-	TableFunction tf("d1_query",
-	                {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                D1RawFunc, D1RawBind, D1RawInitGlobal);
+    TableFunction tf("d1_query",
+                    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+                    D1RawFunc, D1RawBind, D1RawInitGlobal);
+    // Align behavior with other scans: enable projection and complex filter pushdown callback
+    tf.projection_pushdown = true;
+    tf.get_row_id_columns = D1GetRowIdColumns;
+    tf.pushdown_complex_filter = duckdb::D1PushdownComplexFilter;
+    tf.filter_pushdown = false;
+    tf.filter_prune = false;
     loader.RegisterFunction(tf);
 
 	auto exec_fun = ScalarFunction("d1_execute",
@@ -229,6 +209,8 @@ void RegisterD1QueryFunctions(ExtensionLoader &loader) {
 	// Enable projection pushdown for UPDATE/INSERT/DELETE support
 	d1_scan_tf.projection_pushdown = true;
 	d1_scan_tf.get_row_id_columns = D1GetRowIdColumns;
+// Enable complex filter pushdown (only simple/safe filters are pushed)
+d1_scan_tf.pushdown_complex_filter = duckdb::D1PushdownComplexFilter;
     loader.RegisterFunction(d1_scan_tf);
 
     // Register d1_scan_secret table function
@@ -239,6 +221,8 @@ void RegisterD1QueryFunctions(ExtensionLoader &loader) {
 	// Enable projection pushdown for UPDATE/INSERT/DELETE support
 	d1_scan_secret_tf.projection_pushdown = true;
 	d1_scan_secret_tf.get_row_id_columns = D1GetRowIdColumns;
+// Enable complex filter pushdown
+d1_scan_secret_tf.pushdown_complex_filter = duckdb::D1PushdownComplexFilter;
     loader.RegisterFunction(d1_scan_secret_tf);
 
     // Register d1_execute table function (similar to postgres_execute)

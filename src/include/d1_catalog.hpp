@@ -155,7 +155,7 @@ private:
     CatalogSet types;
 };
 
-// Forward declarations
+// Forward declaration for bind data used by scan function
 struct D1RawBindData;
 
 class D1TableEntry : public TableCatalogEntry {
